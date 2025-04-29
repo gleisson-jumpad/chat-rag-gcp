@@ -22,7 +22,7 @@ if not os.getenv("INSTANCE_CONNECTION_NAME"):
     os.environ["PG_USER"] = "postgres"  # or your username
     os.environ["PG_PASSWORD"] = "your_password_here"  # replace with your password
     # Add the public IP for direct connection testing
-    os.environ["DB_PUBLIC_IP"] = "34.72.123.456"  # Replace with your Cloud SQL public IP
+    # os.environ["DB_PUBLIC_IP"] = "34.72.123.456"  # Replace with your Cloud SQL public IP
 
 st.set_page_config(page_title="PostgreSQL Connection Test", page_icon="🐘")
 st.title("🔌 PostgreSQL Connection Test")
@@ -105,6 +105,16 @@ def connect_to_postgres(in_cloud_run=False):
     db_user = os.getenv("PG_USER", "postgres")
     db_password = os.getenv("PG_PASSWORD")
     instance_connection_name = os.getenv("INSTANCE_CONNECTION_NAME")
+
+    # Validate instance_connection_name - a common issue
+    if not instance_connection_name or instance_connection_name.count(":") != 2:
+        st.error(f"Invalid INSTANCE_CONNECTION_NAME: {instance_connection_name}")
+        st.warning("Format should be: PROJECT_ID:REGION:INSTANCE_NAME")
+        
+        # Try to fix if it's missing the instance name part
+        if instance_connection_name and instance_connection_name.count(":") == 1:
+            instance_connection_name = f"{instance_connection_name}:chat-rag-db"
+            st.info(f"Attempting to fix by appending instance name: {instance_connection_name}")
 
     connection = None
     error_messages = []
@@ -495,10 +505,60 @@ def main():
                     st.json({"cloudsql_directory_contents": dir_contents})
                 else:
                     st.warning(f"{cloudsql_dir} directory is empty")
+                    st.error("Cloud SQL Auth Proxy may not be running correctly")
+                    st.info("Check that --add-cloudsql-instances flag is set correctly in deployment")
+                    
+                    # Check if service account has proper permissions
+                    st.subheader("Cloud SQL Service Account Check")
+                    st.info("The service account needs the 'Cloud SQL Client' role")
+                    st.code("gcloud projects add-iam-policy-binding PROJECT_ID --member=serviceAccount:SERVICE_ACCOUNT_EMAIL --role=roles/cloudsql.client")
+                    
+                    # List IAM permissions for this instance if possible
+                    instance_name = os.getenv("INSTANCE_CONNECTION_NAME", "").split(":")[-1] if os.getenv("INSTANCE_CONNECTION_NAME") else ""
+                    if instance_name:
+                        st.info(f"Verify permissions for Cloud SQL instance: {instance_name}")
             except Exception as e:
                 st.error(f"Error listing {cloudsql_dir} directory: {str(e)}")
         else:
             st.error(f"{cloudsql_dir} directory does not exist")
+            
+    # Add verification for Cloud SQL Admin API
+    if in_cloud_run:
+        st.subheader("Cloud SQL Admin API Check")
+        st.info("Make sure the Cloud SQL Admin API is enabled in your project:")
+        st.code("gcloud services enable sqladmin.googleapis.com")
+        
+    # Add proxy test section
+    st.subheader("Cloud SQL Auth Proxy Test")
+    if st.button("Test Auth Proxy Status"):
+        if in_cloud_run:
+            instance_connection_name = os.getenv("INSTANCE_CONNECTION_NAME")
+            if not instance_connection_name:
+                st.error("INSTANCE_CONNECTION_NAME environment variable is not set")
+            else:
+                # Check if socket directory exists for this instance
+                instance_socket_dir = f"/cloudsql/{instance_connection_name}"
+                if os.path.exists(instance_socket_dir):
+                    try:
+                        socket_files = os.listdir(instance_socket_dir)
+                        if socket_files:
+                            st.success(f"Socket directory contains: {socket_files}")
+                            if '.s.PGSQL.5432' in socket_files:
+                                st.success("✅ PostgreSQL socket file exists!")
+                            else:
+                                st.warning("❌ PostgreSQL socket file (.s.PGSQL.5432) is missing")
+                        else:
+                            st.warning("Socket directory exists but is empty")
+                            st.info("This suggests Cloud SQL Auth Proxy isn't creating socket files")
+                    except Exception as e:
+                        st.error(f"Error checking socket directory: {str(e)}")
+                else:
+                    st.error(f"Socket directory for this instance doesn't exist: {instance_socket_dir}")
+                    st.info("This suggests that Cloud SQL Auth Proxy isn't correctly configured")
+        else:
+            # Local environment check
+            st.info("In local environment, check Cloud SQL Auth Proxy manually")
+            st.code("./cloud-sql-proxy --unix-socket=/tmp/cloudsql INSTANCE_CONNECTION_NAME")
     
     # Track connection results for summary
     connection_summary = {
