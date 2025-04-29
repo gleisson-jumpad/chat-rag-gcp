@@ -18,7 +18,7 @@ gcloud run deploy $SERVICE_NAME \
   --set-env-vars="INSTANCE_CONNECTION_NAME=chat-rag-v1:us-east4:chat-rag-db" \
   --set-env-vars="PG_DB=postgres" \
   --set-env-vars="PG_USER=postgres" \
-  --set-env-vars="PG_PASSWORD=your_password_here" \
+  --set-env-vars="PG_PASSWORD=AMGQk@50l9Eu" \
   --set-env-vars="DB_PUBLIC_IP=34.72.123.456" \
   --set-env-vars="VPC_CONNECTOR=cloudrun-vpc-connector" \
   --allow-unauthenticated \
