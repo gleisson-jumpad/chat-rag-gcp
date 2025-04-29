@@ -21,7 +21,7 @@ try:
     cursor.execute("SELECT version();")
     version = cursor.fetchone()[0]
 
-    st.success("✅ Conexão estabelecida com sucesso!")
+    st.success("✅ Conexão estabelecida com sucesso! Vai com tudo!!!!")
     st.code(version)
 
     cursor.close()
