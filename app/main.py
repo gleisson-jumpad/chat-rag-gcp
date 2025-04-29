@@ -404,8 +404,19 @@ def main():
         else:
             st.error(f"{cloudsql_dir} directory does not exist")
     
+    # Track connection results for summary
+    connection_summary = {
+        "unix_socket": {"tried": False, "success": False, "error": None},
+        "tcp_socket": {"tried": False, "success": False, "error": None},
+        "public_ip": {"tried": False, "success": False, "error": None},
+        "private_ip": {"tried": False, "success": False, "error": None}
+    }
+    
     if st.button("Test Connection"):
         connection, error = connect_to_postgres(in_cloud_run)
+        
+        # First attempt - Unix socket
+        connection_summary["unix_socket"]["tried"] = True
         
         if connection:
             try:
@@ -416,11 +427,71 @@ def main():
                 connection[0].close()
                 st.success("✅ Connection successful!")
                 st.write(f"PostgreSQL Version: {version[0]}")
+                connection_summary["unix_socket"]["success"] = True
             except Exception as e:
                 st.error(f"❌ Query execution failed: {str(e)}")
+                connection_summary["unix_socket"]["error"] = str(e)
         else:
             st.error("❌ Connection failed")
             st.error(error)
+            connection_summary["unix_socket"]["error"] = error
+            
+            # If Unix socket failed, try public IP
+            if os.getenv("DB_PUBLIC_IP"):
+                connection_summary["public_ip"]["tried"] = True
+                st.subheader("🔄 Trying direct connection via public IP")
+                try:
+                    conn = psycopg2.connect(
+                        dbname=os.getenv("PG_DB"),
+                        user=os.getenv("PG_USER"),
+                        password=os.getenv("PG_PASSWORD"),
+                        host=os.getenv("DB_PUBLIC_IP"),
+                        port="5432"
+                    )
+                    
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT version();")
+                    version = cursor.fetchone()[0]
+                    
+                    st.success("✅ Public IP connection successful!")
+                    st.code(version)
+                    
+                    cursor.close()
+                    conn.close()
+                    connection_summary["public_ip"]["success"] = True
+                except Exception as direct_err:
+                    st.error("❌ Public IP connection failed:")
+                    st.code(str(direct_err))
+                    connection_summary["public_ip"]["error"] = str(direct_err)
+            
+            # If in Cloud Run, try private IP
+            if in_cloud_run and os.getenv("INSTANCE_CONNECTION_NAME"):
+                connection_summary["private_ip"]["tried"] = True
+                st.subheader("🔄 Trying private IP connection")
+                try:
+                    connection_name = os.getenv("INSTANCE_CONNECTION_NAME")
+                    conn = psycopg2.connect(
+                        dbname=os.getenv("PG_DB"),
+                        user=os.getenv("PG_USER"),
+                        password=os.getenv("PG_PASSWORD"),
+                        host=f"{connection_name.split(':')[0]}-private.{connection_name.split(':')[1]}.sql.gcp.internal",
+                        port="5432"
+                    )
+                    
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT version();")
+                    version = cursor.fetchone()[0]
+                    
+                    st.success("✅ Private IP connection successful!")
+                    st.code(version)
+                    
+                    cursor.close()
+                    conn.close()
+                    connection_summary["private_ip"]["success"] = True
+                except Exception as private_err:
+                    st.error("❌ Private IP connection failed:")
+                    st.code(str(private_err))
+                    connection_summary["private_ip"]["error"] = str(private_err)
             
             # Display additional troubleshooting information
             st.subheader("Troubleshooting Notes")
@@ -448,6 +519,45 @@ def main():
             - Verify network connectivity (firewall rules, IP addresses)
             - Confirm correct credentials (username/password)
             """)
+        
+        # Display comprehensive connection summary at the bottom
+        st.subheader("📊 Connection Results Summary")
+        
+        # Create a formatted summary table
+        summary_md = """
+        | Connection Method | Attempted | Result | Error (if any) |
+        |------------------|-----------|--------|----------------|
+        """
+        
+        for method, details in connection_summary.items():
+            method_name = method.replace("_", " ").title()
+            attempted = "✅" if details["tried"] else "❌"
+            result = "✅ Success" if details["success"] else ("❌ Failed" if details["tried"] else "Not Attempted")
+            error = details["error"] if details["error"] else "-"
+            
+            if isinstance(error, str) and len(error) > 50:
+                error = error[:50] + "..."
+                
+            summary_md += f"| {method_name} | {attempted} | {result} | {error} |\n"
+        
+        st.markdown(summary_md)
+        
+        # Add final recommendation
+        if any(details["success"] for details in connection_summary.values()):
+            st.success("✅ At least one connection method worked! You can proceed with your application.")
+            
+            # Show which method worked best
+            working_methods = [method.replace("_", " ").title() for method, details in connection_summary.items() if details["success"]]
+            st.info(f"Working connection methods: {', '.join(working_methods)}")
+            
+            if connection_summary["unix_socket"]["success"]:
+                st.info("💡 Unix Socket connection is the recommended method for Cloud Run deployments.")
+            elif connection_summary["private_ip"]["success"]:
+                st.info("💡 Private IP connection is working. This is good for VPC networking.")
+            elif connection_summary["public_ip"]["success"]:
+                st.warning("⚠️ Only Public IP connection is working. Consider securing your connection with private networking.")
+        else:
+            st.error("❌ All connection methods failed. Please review the troubleshooting notes.")
 
 if __name__ == "__main__":
     main()
