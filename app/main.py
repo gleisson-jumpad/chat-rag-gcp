@@ -16,7 +16,12 @@ try:
         password=os.getenv("PG_PASSWORD"),
         host=f"/cloudsql/{os.getenv('INSTANCE_CONNECTION_NAME')}"
     )
-    
+    socket_path = f"/cloudsql/{os.getenv('INSTANCE_CONNECTION_NAME')}"
+    print("🔍 Conteúdo do /cloudsql:")
+    print(os.listdir("/cloudsql"))
+    print("🔍 Verificando se socket existe:", os.path.exists(socket_path))
+    st.code(socket_path)
+
     cursor = conn.cursor()
     cursor.execute("SELECT version();")
     version = cursor.fetchone()[0]
