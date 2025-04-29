@@ -14,9 +14,9 @@ try:
         dbname=os.getenv("PG_DB"),
         user=os.getenv("PG_USER"),
         password=os.getenv("PG_PASSWORD"),
-        host=f"{socket_dir}/{connection_name}"
+        host=f"/cloudsql/{os.getenv('INSTANCE_CONNECTION_NAME')}"
     )
-
+    
     cursor = conn.cursor()
     cursor.execute("SELECT version();")
     version = cursor.fetchone()[0]
