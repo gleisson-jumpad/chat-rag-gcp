@@ -1,22 +1,30 @@
 import streamlit as st
+import psycopg2
+import os
 
-st.set_page_config(page_title="Chat RAG", page_icon="🤖")
+st.set_page_config(page_title="Teste DB", page_icon="🐘")
 
-st.title("Chat RAG - Beta 🚀")
-st.write("Olá! Esta é a primeira versão do nosso chat com RAG no GCP!")
+st.title("🔌 Teste de Conexão com PostgreSQL (GCP)")
 
-# Chat simple placeholder
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+try:
+    conn = psycopg2.connect(
+        host=os.getenv("PG_HOST"),
+        port=os.getenv("PG_PORT", "5432"),
+        dbname=os.getenv("PG_DB"),
+        user=os.getenv("PG_USER"),
+        password=os.getenv("PG_PASSWORD"),
+        connect_timeout=5
+    )
+    cursor = conn.cursor()
+    cursor.execute("SELECT version();")
+    version = cursor.fetchone()[0]
 
-# Mostrar mensagens
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+    st.success("✅ Conexão estabelecida com sucesso!")
+    st.code(version)
 
-# Input de usuário
-if user_input := st.chat_input("Digite sua pergunta..."):
-    st.session_state.messages.append({"role": "user", "content": user_input})
-    # Responder com placeholder
-    response = f"Você disse: {user_input}"
-    st.session_state.messages.append({"role": "assistant", "content": response})
+    cursor.close()
+    conn.close()
+
+except Exception as e:
+    st.error("❌ Erro ao conectar no banco de dados:")
+    st.code(str(e))

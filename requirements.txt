@@ -1,6 +1,2 @@
-openai
-llama-index
-pgvector
-psycopg2-binary
 streamlit
-python-dotenv
+psycopg2-binary
