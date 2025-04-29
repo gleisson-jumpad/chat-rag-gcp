@@ -8,13 +8,12 @@ st.title("🔌 Teste de Conexão com PostgreSQL (GCP)")
 
 try:
     conn = psycopg2.connect(
-        host=os.getenv("PG_HOST"),
-        port=os.getenv("PG_PORT", "5432"),
         dbname=os.getenv("PG_DB"),
         user=os.getenv("PG_USER"),
         password=os.getenv("PG_PASSWORD"),
-        connect_timeout=5
+        unix_sock=f"/cloudsql/{os.getenv('INSTANCE_CONNECTION_NAME')}/.s.PGSQL.5432"
     )
+
     cursor = conn.cursor()
     cursor.execute("SELECT version();")
     version = cursor.fetchone()[0]
