@@ -53,4 +53,8 @@ logs/
 .ipynb_checkpoints
 
 # Local development files
-.DS_Store 
+.DS_Store
+
+# Project specific
+not_submit.txt
+system-requirement.txt 
