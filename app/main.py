@@ -7,11 +7,14 @@ st.set_page_config(page_title="Teste DB", page_icon="🐘")
 st.title("🔌 Teste de Conexão com PostgreSQL (GCP)")
 
 try:
+    connection_name = os.getenv("INSTANCE_CONNECTION_NAME")  # ex: chat-rag-v1:us-east4:chat-rag-db
+    socket_dir = "/cloudsql"  # Caminho fixo no Cloud Run
+
     conn = psycopg2.connect(
         dbname=os.getenv("PG_DB"),
         user=os.getenv("PG_USER"),
         password=os.getenv("PG_PASSWORD"),
-        unix_sock=f"/cloudsql/{os.getenv('INSTANCE_CONNECTION_NAME')}/.s.PGSQL.5432"
+        host=f"{socket_dir}/{connection_name}"
     )
 
     cursor = conn.cursor()
