@@ -26,5 +26,9 @@ try:
     conn.close()
 
 except Exception as e:
+    import traceback
     st.error("❌ Erro ao conectar no banco de dados:")
     st.code(str(e))
+    # Mostrar traceback no log (importante para Cloud Logging)
+    print("Erro ao conectar no banco:")
+    traceback.print_exc()
