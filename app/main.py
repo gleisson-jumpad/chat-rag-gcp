@@ -124,14 +124,39 @@ def connect_to_postgres(in_cloud_run=False):
     if in_cloud_run and instance_connection_name:
         # Standard Unix socket path in Cloud Run
         unix_socket = f"/cloudsql/{instance_connection_name}"
+        
+        # Debug information
+        socket_exists = os.path.exists(unix_socket)
+        socket_readable = os.access(unix_socket, os.R_OK) if socket_exists else False
+        socket_writable = os.access(unix_socket, os.W_OK) if socket_exists else False
+        socket_executable = os.access(unix_socket, os.X_OK) if socket_exists else False
+        
+        # Display the state of the socket
+        st.write("Unix Socket Details:")
+        st.json({
+            "unix_socket_path": unix_socket,
+            "exists": socket_exists,
+            "readable": socket_readable,
+            "writable": socket_writable,
+            "executable": socket_executable
+        })
+        
+        # List contents if possible
+        if socket_exists:
+            try:
+                socket_contents = os.listdir(unix_socket)
+                st.write(f"Contents of {unix_socket}: {socket_contents}")
+            except Exception as e:
+                st.write(f"Error listing {unix_socket}: {str(e)}")
+        
         connection_methods.append({
             "method": "Cloud SQL Unix Socket",
             "details": {
                 "socket_path": unix_socket,
-                "socket_exists": os.path.exists(unix_socket),
-                "socket_readable": os.access(unix_socket, os.R_OK) if os.path.exists(unix_socket) else False,
-                "socket_writable": os.access(unix_socket, os.W_OK) if os.path.exists(unix_socket) else False,
-                "socket_executable": os.access(unix_socket, os.X_OK) if os.path.exists(unix_socket) else False
+                "socket_exists": socket_exists,
+                "socket_readable": socket_readable,
+                "socket_writable": socket_writable,
+                "socket_executable": socket_executable
             }
         })
         
@@ -148,25 +173,96 @@ def connect_to_postgres(in_cloud_run=False):
             error_detail = traceback.format_exc()
             error_messages.append(f"Unix socket connection failed: {str(e)}\n{error_detail}")
     
-    # 2. Try TCP connection via the Unix socket
+    # 2. Try PostgreSQL specific Unix socket path for Cloud Run
     if in_cloud_run and instance_connection_name:
+        # PostgreSQL specific Unix socket path
+        pg_socket = f"/cloudsql/{instance_connection_name}/.s.PGSQL.5432"
+        pg_socket_dir = f"/cloudsql/{instance_connection_name}"
+        
+        # Check if directory exists first
+        if os.path.exists(pg_socket_dir):
+            st.write(f"PostgreSQL socket directory exists: {pg_socket_dir}")
+            try:
+                dir_contents = os.listdir(pg_socket_dir)
+                st.write(f"Contents: {dir_contents}")
+                
+                # Check for the specific PostgreSQL socket file
+                pg_socket_exists = '.s.PGSQL.5432' in dir_contents
+                st.write(f"PostgreSQL socket file exists: {pg_socket_exists}")
+            except Exception as e:
+                st.write(f"Error listing PostgreSQL socket directory: {str(e)}")
+        
         connection_methods.append({
-            "method": "TCP via Unix Socket",
+            "method": "PostgreSQL Specific Socket",
             "details": {
-                "instance_connection_name": instance_connection_name
+                "socket_path": pg_socket,
+                "directory_exists": os.path.exists(pg_socket_dir)
             }
         })
         
         try:
-            st.info(f"Attempting TCP connection via Unix socket")
-            connection_string = f"dbname='{db_name}' user='{db_user}' password='{db_password}' host='/cloudsql/{instance_connection_name}'"
-            connection = psycopg2.connect(connection_string)
+            st.info(f"Attempting connection via PostgreSQL specific socket")
+            # For PostgreSQL, we still use the directory path but the driver will look for the .s.PGSQL.5432 file
+            connection = psycopg2.connect(
+                database=db_name,
+                user=db_user,
+                password=db_password,
+                host=pg_socket_dir  # Use the directory, not the actual socket file
+            )
             return connection, None
         except Exception as e:
             error_detail = traceback.format_exc()
-            error_messages.append(f"TCP via Unix socket connection failed: {str(e)}\n{error_detail}")
+            error_messages.append(f"PostgreSQL specific socket connection failed: {str(e)}\n{error_detail}")
 
-    # 3. Use public IP as fallback
+    # 3. Try private IP for Cloud Run with VPC connector
+    if in_cloud_run and instance_connection_name:
+        # Parse instance connection name to generate private IP hostname
+        try:
+            project, region, instance = instance_connection_name.split(":")
+            private_host = f"{project}:{region}:{instance}"
+            st.write(f"Private IP host: {private_host}")
+            
+            connection_methods.append({
+                "method": "Private IP Connection",
+                "details": {
+                    "host": f"{project}-private.{region}.sql.gcp.internal",
+                    "port": "5432"
+                }
+            })
+            
+            # First format with project-private
+            try:
+                st.info(f"Attempting connection via private IP: {project}-private.{region}.sql.gcp.internal")
+                connection = psycopg2.connect(
+                    dbname=db_name,
+                    user=db_user,
+                    password=db_password,
+                    host=f"{project}-private.{region}.sql.gcp.internal",
+                    port="5432"
+                )
+                return connection, None
+            except Exception as e:
+                st.warning(f"First private IP format failed: {str(e)}")
+                
+                # Try alternate format
+                try:
+                    alternate_host = f"{instance}-private.{region}.sql.gcp.internal"
+                    st.info(f"Attempting alternate private IP format: {alternate_host}")
+                    connection = psycopg2.connect(
+                        dbname=db_name,
+                        user=db_user,
+                        password=db_password,
+                        host=alternate_host,
+                        port="5432"
+                    )
+                    return connection, None
+                except Exception as alt_e:
+                    error_detail = traceback.format_exc()
+                    error_messages.append(f"Private IP connection failed: {str(e)} / {str(alt_e)}\n{error_detail}")
+        except Exception as e:
+            st.warning(f"Error parsing instance connection name: {str(e)}")
+
+    # 4. Use public IP as fallback
     if db_host:
         connection_methods.append({
             "method": "Public IP Connection",
