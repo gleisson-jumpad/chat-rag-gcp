@@ -4,7 +4,10 @@
 PROJECT_ID="chat-rag-v1"  # Your actual GCP project ID
 REGION="us-east4"
 SERVICE_NAME="postgres-connection-test"
-INSTANCE_CONNECTION_NAME="chat-rag-v1:us-east4:chat-rag-db"
+INSTANCE_NAME="chat-rag-db"
+INSTANCE_CONNECTION_NAME="${PROJECT_ID}:${REGION}:${INSTANCE_NAME}"
+
+echo "Using connection name: $INSTANCE_CONNECTION_NAME"
 
 # Build the container
 echo "Building container..."
@@ -21,6 +24,7 @@ gcloud run deploy $SERVICE_NAME \
   --set-env-vars="PG_USER=postgres" \
   --set-env-vars="PG_PASSWORD=AMGQk@50l9Eu" \
   --set-env-vars="VPC_CONNECTOR=cloudrun-vpc-connector" \
+  --set-env-vars="PG_HOST=/cloudsql/${INSTANCE_CONNECTION_NAME}" \
   --allow-unauthenticated \
   --add-cloudsql-instances=${INSTANCE_CONNECTION_NAME} \
   --service-account="682048092511-compute@developer.gserviceaccount.com" \

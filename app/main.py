@@ -113,8 +113,12 @@ def connect_to_postgres(in_cloud_run=False):
         
         # Try to fix if it's missing the instance name part
         if instance_connection_name and instance_connection_name.count(":") == 1:
+            original_name = instance_connection_name
             instance_connection_name = f"{instance_connection_name}:chat-rag-db"
             st.info(f"Attempting to fix by appending instance name: {instance_connection_name}")
+            # Update the environment variable for future use
+            os.environ["INSTANCE_CONNECTION_NAME"] = instance_connection_name
+            st.warning(f"Fixed INSTANCE_CONNECTION_NAME from {original_name} to {instance_connection_name}")
 
     connection = None
     error_messages = []

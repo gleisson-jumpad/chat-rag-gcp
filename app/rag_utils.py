@@ -21,13 +21,25 @@ def process_uploaded_file(file, session_id):
     # Ler documentos via LlamaIndex
     docs = SimpleDirectoryReader(input_files=[filepath]).load_data()
 
-    # Conectar com pgvector
+    # Conectar com pgvector usando variáveis atualizadas
+    instance_connection_name = os.getenv("INSTANCE_CONNECTION_NAME")
+    
+    # Verify if running in Cloud Run (Unix socket) or locally
+    if os.path.exists("/cloudsql"):
+        # In Cloud Run, use Unix socket
+        host = f"/cloudsql/{instance_connection_name}"
+        port = None
+    else:
+        # Local development or public IP
+        host = os.getenv("PG_HOST", "localhost")
+        port = int(os.getenv("PG_PORT", 5432))
+    
     vector_store = PGVectorStore.from_params(
         database=os.getenv("PG_DB"),
         user=os.getenv("PG_USER"),
         password=os.getenv("PG_PASSWORD"),
-        host=os.getenv("PG_HOST"),
-        port=int(os.getenv("PG_PORT", 5432)),
+        host=host,
+        port=port,
         table_name=f"vectors_{session_id}"
     )
 
