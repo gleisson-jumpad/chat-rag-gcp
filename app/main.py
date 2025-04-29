@@ -33,6 +33,11 @@ st.code(f"Platform: {platform.system()} {platform.release()}")
 st.code(f"Python: {platform.python_version()}")
 st.code(f"Instance Connection Name: {os.getenv('INSTANCE_CONNECTION_NAME')}")
 
+# Quick direct test link
+if st.button("Open Direct Test Page"):
+    import direct_test
+    st.experimental_rerun()
+
 # Detect environment
 is_cloud_run = os.path.exists("/cloudsql")
 st.code(f"Running in Cloud Run: {'✅' if is_cloud_run else '❌'}")
