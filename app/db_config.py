@@ -34,7 +34,7 @@ def get_pg_connection():
             dbname=dbname,
             user=user,
             password=password,
-            connect_timeout=5 # Manter um timeout é bom
+            connect_timeout=30 # Manter um timeout é bom
         )
         logging.info("✅ Conexão via IP público bem-sucedida!")
         return conn
