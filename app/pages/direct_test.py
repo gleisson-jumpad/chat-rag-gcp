@@ -35,11 +35,17 @@ if st.button("Test Direct Public IP Connection"):
     try:
         st.info(f"Attempting connection to public IP: {public_ip}")
         
+        # Get password from environment variable
+        db_password = os.environ.get("PG_PASSWORD", "")
+        if not db_password:
+            st.error("PG_PASSWORD environment variable is not set")
+            st.stop()
+        
         connection = psycopg2.connect(
             host=public_ip,
             database="postgres",
             user="postgres",
-            password=st.secrets.get("db_password", os.environ.get("PG_PASSWORD", ""))
+            password=db_password
         )
         
         # Execute a simple query
@@ -98,11 +104,17 @@ if is_cloud_run:
             socket_path = f"/cloudsql/{instance_connection_name}"
             st.info(f"Attempting connection via Unix socket: {socket_path}")
             
+            # Get password from environment variable
+            db_password = os.environ.get("PG_PASSWORD", "")
+            if not db_password:
+                st.error("PG_PASSWORD environment variable is not set")
+                st.stop()
+            
             connection = psycopg2.connect(
                 host=socket_path,
                 database="postgres",
                 user="postgres",
-                password=st.secrets.get("db_password", os.environ.get("PG_PASSWORD", ""))
+                password=db_password
             )
             
             cursor = connection.cursor()
@@ -124,11 +136,49 @@ env_vars = {
     "INSTANCE_CONNECTION_NAME": os.environ.get("INSTANCE_CONNECTION_NAME", "Not set"),
     "PG_DB": os.environ.get("PG_DB", "Not set"),
     "PG_USER": os.environ.get("PG_USER", "Not set"),
-    "PG_PASSWORD": "*****" if os.environ.get("PG_PASSWORD") else "Not set",
+    "PG_PASSWORD": "****" if os.environ.get("PG_PASSWORD") else "Not set (ERROR)",
     "PG_HOST": os.environ.get("PG_HOST", "Not set"),
     "DB_PUBLIC_IP": os.environ.get("DB_PUBLIC_IP", "Not set")
 }
 st.json(env_vars)
+
+# Password verification
+pg_password = os.environ.get("PG_PASSWORD", "")
+if not pg_password:
+    st.error("⚠️ PG_PASSWORD is not set! This will cause connection failures.")
+else:
+    st.success(f"✅ PG_PASSWORD is set (length: {len(pg_password)} characters)")
+
+# Unix socket diagnostic
+st.subheader("Unix Socket Diagnostic")
+cloudsql_dir = "/cloudsql"
+if os.path.exists(cloudsql_dir):
+    st.success(f"✅ {cloudsql_dir} directory exists")
+    try:
+        contents = os.listdir(cloudsql_dir)
+        if contents:
+            st.json({"cloudsql_directory_contents": contents})
+            
+            # Check subdirectories
+            for item in contents:
+                full_path = os.path.join(cloudsql_dir, item)
+                if os.path.isdir(full_path):
+                    try:
+                        subcontents = os.listdir(full_path)
+                        st.write(f"Contents of {full_path}: {subcontents}")
+                        
+                        if '.s.PGSQL.5432' in subcontents:
+                            st.success(f"✅ PostgreSQL socket file found in {full_path}")
+                        else:
+                            st.warning(f"❌ No PostgreSQL socket file in {full_path}")
+                    except Exception as e:
+                        st.error(f"Error listing {full_path}: {str(e)}")
+        else:
+            st.warning(f"{cloudsql_dir} directory is empty")
+    except Exception as e:
+        st.error(f"Error listing {cloudsql_dir}: {str(e)}")
+else:
+    st.error(f"{cloudsql_dir} directory does not exist")
 
 # Show connection options
 st.subheader("Connection Options")
@@ -136,11 +186,19 @@ st.subheader("Connection Options")
 # Allow user to test different connection string formats
 custom_connection_string = st.text_input(
     "Custom Connection String", 
-    value=f"dbname=postgres user=postgres password=***** host={public_ip}"
+    value=f"dbname=postgres user=postgres password=***** host={public_ip} hostaddr={public_ip}"
 )
+
+st.info("Add 'hostaddr=' parameter to force TCP connection instead of socket")
 
 if st.button("Test Custom Connection"):
     try:
+        # Get password from environment variable
+        db_password = os.environ.get("PG_PASSWORD", "")
+        if not db_password:
+            st.error("PG_PASSWORD environment variable is not set")
+            st.stop()
+            
         # Mask the displayed connection string if it contains a password
         display_string = custom_connection_string
         if "password" in custom_connection_string:
@@ -153,7 +211,7 @@ if st.button("Test Custom Connection"):
         st.info(f"Attempting connection with: {display_string}")
         
         # Create the actual connection
-        connection = psycopg2.connect(custom_connection_string.replace("*****", os.environ.get("PG_PASSWORD", "")))
+        connection = psycopg2.connect(custom_connection_string.replace("*****", db_password))
         
         cursor = connection.cursor()
         cursor.execute("SELECT version();")
