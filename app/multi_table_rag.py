@@ -154,7 +154,7 @@ class MultiTableRAGTool:
                     **self.db_config,  # Include all database config parameters
                     "table_name": table_name,
                     "embed_dim": table_config.get("embed_dim", 1536),
-                    "hybrid_search": True,  # Explicitly enable hybrid search for querying
+                    "hybrid_search": False, # <-- Force disable hybrid search for querying test
                     "text_search_config": table_config.get("language", "english"), # Explicitly set config
                 }
                 
@@ -172,8 +172,7 @@ class MultiTableRAGTool:
                     self.indexes[table_name] = VectorStoreIndex.from_vector_store(
                         self.vector_stores[table_name],
                         embed_model=embed_model,
-                        store_nodes_override=True,
-                        vector_store_kwargs={"content_col": "text"}
+                        store_nodes_override=True
                     )
                     self.logger.info(f"SUCCESS: VectorStoreIndex created for {table_name}")
                 except Exception as e:
