@@ -1,0 +1,20 @@
+steps:
+  # Constrói a imagem do Docker
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', 'gcr.io/chat-rag-v1/chat-rag', '.']
+  
+  # Opcional: Push da imagem para o Container Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/chat-rag-v1/chat-rag']
+
+# Armazena logs no bucket que você criou
+logsBucket: 'gs://chat-rag'
+
+# Usa a mesma conta de serviço que você especificou
+options:
+  logging: GCS_ONLY
+  serviceAccount: '682048092511-compute@developer.gserviceaccount.com'
+
+# Define a imagem final que será usada
+images:
+  - 'gcr.io/chat-rag-v1/chat-rag'
