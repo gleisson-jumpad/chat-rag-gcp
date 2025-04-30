@@ -51,7 +51,7 @@ class PostgresRAGManager:
         try:
             logging.info(f"Creating PGVectorStore with params: host={self.host}, port={self.port}, db={self.dbname}, user={self.user}")
             
-            # Create vector store with advanced configuration
+            # Create vector store with basic configuration (for testing schema creation)
             self.vector_store = PGVectorStore.from_params(
                 host=self.host,
                 port=self.port,
@@ -59,16 +59,8 @@ class PostgresRAGManager:
                 user=self.user,
                 password=self.password,
                 table_name=self.table_name,
-                embed_dim=1536,     # OpenAI embedding dimension
-                use_jsonb=True,     # Use JSONB for metadata storage
-                hybrid_search=True, # Enable hybrid search capability
-                text_search_config="english", # Text search configuration
-                hnsw_kwargs={       # HNSW index configuration for faster searches
-                    "hnsw_m": 16,
-                    "hnsw_ef_construction": 64,
-                    "hnsw_ef_search": 40,
-                    "hnsw_dist_method": "vector_cosine_ops"
-                }
+                embed_dim=1536, # OpenAI embedding dimension
+                # Removed use_jsonb, hybrid_search, text_search_config, hnsw_kwargs for testing
             )
             
             logging.info(f"Successfully created PGVectorStore for table {self.table_name}")

@@ -1,6 +1,12 @@
 import os
 import json
 import logging
+import time # Import time
+
+# --- Add this line for debugging file loading ---
+print(f"--- Loading app/multi_table_rag.py @ {time.time()} ---")
+# -----------------------------------------------
+
 from typing import List, Dict, Any
 from llama_index.core import VectorStoreIndex, StorageContext, Settings
 from llama_index.vector_stores.postgres import PGVectorStore
@@ -148,12 +154,9 @@ class MultiTableRAGTool:
                     **self.db_config,  # Include all database config parameters
                     "table_name": table_name,
                     "embed_dim": table_config.get("embed_dim", 1536),
+                    "hybrid_search": True,  # Explicitly enable hybrid search for querying
+                    "text_search_config": table_config.get("language", "english") # Explicitly set config
                 }
-                
-                # Add additional parameters if specified
-                if table_config.get("hybrid_search", False):
-                    vector_store_params["hybrid_search"] = True
-                    vector_store_params["text_search_config"] = table_config.get("language", "english")
                 
                 # Create embedding model
                 embed_model = OpenAIEmbedding(model="text-embedding-ada-002")

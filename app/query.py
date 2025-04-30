@@ -3,6 +3,8 @@ import logging
 from dotenv import load_dotenv
 from llama_index.core.vector_stores import VectorStoreQuery
 from llama_index.embeddings.openai import OpenAIEmbedding
+from db_config import get_pg_connection # Import the connection function
+import json # For pretty printing JSON
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -29,6 +31,36 @@ except ImportError as e:
     logger.error(f"Erro ao importar MultiTableRAGTool: {e}")
     logger.error("Certifique-se de que o script está sendo executado do diretório raiz do projeto ou ajuste o PYTHONPATH.")
     exit(1)
+
+# --- Add function to execute direct SQL ---
+def execute_direct_sql(query: str):
+    logger.info(f"Executando SQL direto: {query[:100]}...")
+    conn = None
+    try:
+        conn = get_pg_connection()
+        cursor = conn.cursor()
+        cursor.execute(query)
+        
+        if cursor.description:
+            column_names = [desc[0] for desc in cursor.description]
+            results = cursor.fetchall()
+            logger.info(f"SQL retornou {len(results)} linhas.")
+            return results, column_names
+        else:
+            logger.info("SQL não retornou resultados (possivelmente um comando DDL/DML).")
+            conn.commit() # Commit if it was an action query
+            return [], None
+            
+    except Exception as e:
+        logger.error(f"Erro ao executar SQL direto: {e}")
+        if conn:
+            conn.rollback() # Rollback on error
+        return None, None
+    finally:
+        if conn:
+            cursor.close()
+            conn.close()
+# -----------------------------------------
 
 def run_test_query():
     logger.info("Inicializando MultiTableRAGTool...")
@@ -124,6 +156,54 @@ def run_test_query():
         else:
             logger.warning("Não foi possível encontrar uma tabela de destino ou vector store para o teste direto.")
         # --- End Direct Vector Store Query Test ---
+
+        # --- Execute Direct SQL to Check Content ---
+        logger.info("\n--- Iniciando teste de verificação de conteúdo via SQL --- ")
+        target_table_sql = "data_vectors_06bacfb6_7a3d_404f_a461_73358b4dc1d5" # The new table name
+        target_file_sql = "llamaindex.pdf"
+        sql_query = f"""\
+            SELECT \
+                id, \
+                metadata_, \
+                content \
+            FROM \
+                {target_table_sql} \
+            WHERE \
+                metadata_->>'file_name' = '{target_file_sql}' \
+            LIMIT 5;\
+        """
+        
+        sql_results, column_names = execute_direct_sql(sql_query)
+        
+        print("\n--- Resultado da Verificação de Conteúdo SQL --- ")
+        if sql_results is not None:
+            if sql_results:
+                print(f"Encontradas {len(sql_results)} linhas para '{target_file_sql}' na tabela '{target_table_sql}'.")
+                print(f"Colunas: {column_names}")
+                print("Amostra de Dados:")
+                for i, row in enumerate(sql_results):
+                    print(f"--- Linha {i+1} ---")
+                    row_dict = dict(zip(column_names, row))
+                    print(f"  ID: {row_dict.get('id')}")
+                    # Pretty print metadata
+                    metadata_json = row_dict.get('metadata_')
+                    if metadata_json:
+                         print(f"  Metadata: {json.dumps(metadata_json, indent=2)}")
+                    else:
+                         print(f"  Metadata: None")
+                    print(f"  Content Preview: {str(row_dict.get('content', ''))[:200]}...") # Show preview
+            else:
+                print(f"Nenhuma linha encontrada para '{target_file_sql}' na tabela '{target_table_sql}'. A tabela pode estar vazia ou o nome do arquivo está incorreto no metadados.")
+                # Check if the table exists at all
+                check_table_sql = f"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = '{target_table_sql}');"
+                exists_result, _ = execute_direct_sql(check_table_sql)
+                if exists_result and exists_result[0][0]:
+                     print(f"(A tabela '{target_table_sql}' existe, mas não contém dados para o arquivo especificado.)")
+                else:
+                     print(f"(A tabela '{target_table_sql}' NÃO existe.)")
+        else:
+            print("Ocorreu um erro ao executar a consulta SQL. Verifique os logs.")
+        # ------------------------------------------
 
     except Exception as e:
         logger.error(f"Erro durante a execução do teste de consulta: {e}")
