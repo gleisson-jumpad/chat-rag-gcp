@@ -52,7 +52,6 @@ steps:
 options:
   logging: CLOUD_LOGGING_ONLY
   # --- REGIÃO DE EXECUÇÃO DO BUILD (Alterado para global) ---
-  region: 'global'
 
 # Imagens resultantes do build (opcional)
 images:
