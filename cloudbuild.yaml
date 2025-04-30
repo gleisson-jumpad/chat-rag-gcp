@@ -47,8 +47,8 @@ steps:
       - 'us-east4'
       # Variáveis de Ambiente para IP Público
       - '--set-env-vars=PG_DB=postgres,PG_USER=postgres,PG_PASSWORD=AMGQk@50l9Eu,DB_PUBLIC_IP=34.150.190.157'
-        # !!! ALERTA DE SEGURANÇA: Substitua SUA_SENHA_DEFINIDA_AQUI pela senha real!
-        # !!! RECOMENDADO: Use Secret Manager para a senha em produção!
+      # Referência ao Secret Manager para a API key do OpenAI
+      - '--set-secrets=OPENAI_API_KEY=openai-api-key:latest'
       - '--allow-unauthenticated'
       # Sem flags de VPC/Egress, permitindo saída padrão para internet
       # Conta de Serviço
@@ -71,4 +71,5 @@ substitutions:
   # Adicione outras substituições se necessário
   # _REGION: 'us-east4'
 
-# (Seção availableSecrets para Secret Manager omitida para brevidade, adicione se usar)
+# Nota: É necessário criar o seguinte secret no Secret Manager:
+# - openai-api-key: Contendo a chave de API do OpenAI
