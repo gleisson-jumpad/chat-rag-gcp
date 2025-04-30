@@ -5,13 +5,20 @@ import pathlib
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Carregar variáveis do .env apenas para desenvolvimento local
-# Isso não afeta variáveis já definidas no ambiente (como no Cloud Run)
+# Carregar variáveis do .env - verificar tanto no diretório da aplicação quanto no diretório raiz
 from dotenv import load_dotenv
-env_path = pathlib.Path(__file__).parent / '.env'
-if env_path.exists():
-    logging.info(f"Carregando variáveis do arquivo .env para ambiente local")
-    load_dotenv(dotenv_path=env_path)
+
+# Verificar primeiro no diretório da aplicação
+env_app_path = pathlib.Path(__file__).parent / '.env'
+# Verificar também no diretório raiz (um nível acima)
+env_root_path = pathlib.Path(__file__).parent.parent / '.env'
+
+if env_app_path.exists():
+    logging.info(f"Carregando variáveis do arquivo .env do diretório app")
+    load_dotenv(dotenv_path=env_app_path)
+elif env_root_path.exists():
+    logging.info(f"Carregando variáveis do arquivo .env do diretório raiz")
+    load_dotenv(dotenv_path=env_root_path)
 else:
     logging.info(f"Arquivo .env não encontrado, usando variáveis de ambiente existentes")
 
