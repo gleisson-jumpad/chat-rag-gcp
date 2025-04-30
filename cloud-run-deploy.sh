@@ -3,7 +3,7 @@
 # Set your project ID and region
 PROJECT_ID="chat-rag-v1"  # Your actual GCP project ID
 REGION="us-east4"
-SERVICE_NAME="postgres-connection-test"
+SERVICE_NAME="chat-rag"  # Updated to match your actual service name
 INSTANCE_NAME="chat-rag-db"
 INSTANCE_CONNECTION_NAME="${PROJECT_ID}:${REGION}:${INSTANCE_NAME}"
 

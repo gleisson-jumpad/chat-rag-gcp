@@ -33,10 +33,17 @@ st.code(f"Platform: {platform.system()} {platform.release()}")
 st.code(f"Python: {platform.python_version()}")
 st.code(f"Instance Connection Name: {os.getenv('INSTANCE_CONNECTION_NAME')}")
 
-# Quick direct test link
+# Direct Test Info
+st.subheader("📊 Direct Database Tests")
+st.info("Use the 'Direct Test' page in the sidebar to test direct connections to PostgreSQL.")
+st.write("The direct test page allows you to test connections via public IP or Unix socket.")
+
+# Quick direct test link - use URL parameters instead of trying to import
 if st.button("Open Direct Test Page"):
-    import direct_test
-    st.experimental_rerun()
+    # Generate a URL to the direct test page
+    direct_test_url = "./direct_test_runner.py"
+    st.markdown(f"[Click here to open Direct Test Page]({direct_test_url})")
+    st.info("If the link doesn't work, deploy direct_test.py as a separate Cloud Run service")
 
 # Detect environment
 is_cloud_run = os.path.exists("/cloudsql")

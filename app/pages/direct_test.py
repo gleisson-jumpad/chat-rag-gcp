@@ -73,6 +73,13 @@ if is_cloud_run:
     instance_connection_name = os.environ.get("INSTANCE_CONNECTION_NAME", "")
     st.write(f"INSTANCE_CONNECTION_NAME: {instance_connection_name}")
     
+    # Show diagnostic information about Cloud Run configuration
+    st.info("To verify Cloud Run configuration, run this command in Cloud Shell:")
+    st.code(f"gcloud run services describe chat-rag --region=us-east4 --format='value(spec.template.spec.containerConcurrency)'")
+    
+    st.write("Check that the service has Cloud SQL instances attached:")
+    st.code(f"gcloud run services describe chat-rag --region=us-east4 --format='value(spec.template.annotations.\"run.googleapis.com/cloudsql-instances\")'")
+    
     # Check if the socket directory exists
     socket_dir = f"/cloudsql/{instance_connection_name}"
     socket_exists = os.path.exists(socket_dir)
