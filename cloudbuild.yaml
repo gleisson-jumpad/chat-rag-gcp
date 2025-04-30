@@ -1,9 +1,44 @@
 steps:
+  # Passo 1: Build da Imagem Docker
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-t', 'us-east4-docker.pkg.dev/chat-rag-v1/chat-rag/image:latest', '.']
+    args: ['build', '-t', 'us-east4-docker.pkg.dev/$PROJECT_ID/chat-rag/image:latest', '.']
+    id: Build # Dê um ID a este passo
+
+  # Passo 2: Push da Imagem para o Artifact Registry
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', 'us-east4-docker.pkg.dev/chat-rag-v1/chat-rag/image:latest']
+    args: ['push', 'us-east4-docker.pkg.dev/$PROJECT_ID/chat-rag/image:latest']
+    id: Push # Dê um ID a este passo
+    waitFor: ['Build'] # Espera o passo 'Build' terminar
+
+  # --- PASSO 3: Deploy no Cloud Run (NOVO!) ---
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk' # Builder do gcloud
+    entrypoint: gcloud # Comando principal a ser executado
+    args:
+      - 'run'
+      - 'deploy'
+      - 'chat-rag' # <-- Nome do seu serviço Cloud Run
+      - '--image'
+      - 'us-east4-docker.pkg.dev/$PROJECT_ID/chat-rag/image:latest' # <-- Imagem do passo anterior
+      - '--platform'
+      - 'managed'
+      - '--region'
+      - 'us-east4' # <-- Sua Região
+      - '--add-cloudsql-instances'
+      - '$PROJECT_ID:us-east4:chat-rag-db' # <-- Sua instância Cloud SQL (usando $PROJECT_ID)
+      - '--set-env-vars=INSTANCE_CONNECTION_NAME=$PROJECT_ID:us-east4:chat-rag-db,PG_DB=postgres,PG_USER=postgres,PG_PASSWORD=AMGQk@50l9Eu' # <-- Suas variáveis de ambiente
+        # !!! ALERTA DE SEGURANÇA: Não é ideal ter a senha aqui. Veja abaixo como usar Secret Manager !!!
+      - '--allow-unauthenticated'
+      - '--vpc-connector=cloudrun-vpc-connector' # <-- Seu conector VPC
+      - '--vpc-egress=private-ranges-only' # <-- Sua configuração de saída VPC
+      - '--service-account=682048092511-compute@developer.gserviceaccount.com' # <-- Sua conta de serviço do Cloud Run
+    waitFor: ['Push'] # Espera o passo 'Push' terminar
+
 options:
   logging: CLOUD_LOGGING_ONLY
 images:
-  - 'us-east4-docker.pkg.dev/chat-rag-v1/chat-rag/image:latest'
+  - 'us-east4-docker.pkg.dev/$PROJECT_ID/chat-rag/image:latest'
+
+# Substituições automáticas (Cloud Build geralmente preenche $PROJECT_ID)
+# Se precisar de outras, defina-as aqui ou no Trigger.
+# substitutions:
+#   _MY_VAR: 'value'
