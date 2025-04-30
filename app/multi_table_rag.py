@@ -162,16 +162,19 @@ class MultiTableRAGTool:
                 # Create embedding model
                 embed_model = OpenAIEmbedding(model="text-embedding-ada-002")
                 
-                # Create the vector store
+                self.logger.info(f"Attempting PGVectorStore.from_params for {table_name}")
+                # 1. Create PGVectorStore
                 self.vector_stores[table_name] = PGVectorStore.from_params(**vector_store_params)
+                self.logger.info(f"SUCCESS: PGVectorStore created for {table_name}")
                 
                 # Create the index
                 try:
+                    self.logger.info(f"Attempting VectorStoreIndex.from_vector_store for {table_name}")
                     self.indexes[table_name] = VectorStoreIndex.from_vector_store(
                         self.vector_stores[table_name],
                         embed_model=embed_model
                     )
-                    self.logger.info(f"Loaded existing index from table '{table_name}'")
+                    self.logger.info(f"SUCCESS: VectorStoreIndex created for {table_name}")
                 except Exception as e:
                     self.logger.error(f"Error loading index from table '{table_name}': {e}")
                     continue
@@ -182,9 +185,10 @@ class MultiTableRAGTool:
                     similarity_top_k=table_config.get("top_k", 5),
                     response_mode="compact"
                 )
+                self.logger.info(f"SUCCESS: QueryEngine created for {table_name}")
                 
             except Exception as e:
-                self.logger.error(f"Error initializing resources for table {table_name}: {str(e)}")
+                self.logger.error(f"FAILED Outer Initialization for table {table_name}: {str(e)}")
     
     def query_single_table(self, table_name, query_text):
         """Query a single table"""
