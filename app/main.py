@@ -21,7 +21,7 @@ if menu == "🏠 Início":
 elif menu == "🔌 Teste de Conexão com PostgreSQL":
     st.subheader("🔌 Teste de Conexão com o Banco")
     try:
-        from app.db_config import get_pg_connection
+        from db_config import get_pg_connection
         conn = get_pg_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT version();")
