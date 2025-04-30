@@ -1,12 +1,19 @@
 import os
 import psycopg2
 import logging # É bom manter o logging
+import pathlib
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Se você usa .env para testes locais, pode manter load_dotenv
-# from dotenv import load_dotenv
-# load_dotenv()
+# Carregar variáveis do .env apenas para desenvolvimento local
+# Isso não afeta variáveis já definidas no ambiente (como no Cloud Run)
+from dotenv import load_dotenv
+env_path = pathlib.Path(__file__).parent / '.env'
+if env_path.exists():
+    logging.info(f"Carregando variáveis do arquivo .env para ambiente local")
+    load_dotenv(dotenv_path=env_path)
+else:
+    logging.info(f"Arquivo .env não encontrado, usando variáveis de ambiente existentes")
 
 def get_pg_connection():
     """
@@ -20,6 +27,13 @@ def get_pg_connection():
         dbname = os.getenv("PG_DB")
         user = os.getenv("PG_USER")
         password = os.getenv("PG_PASSWORD")
+        
+        # Debug - verifica OPENAI_API_KEY (sem mostrar o valor completo)
+        api_key = os.getenv("OPENAI_API_KEY", "")
+        if api_key:
+            logging.info(f"OPENAI_API_KEY está definida (primeiros 8 caracteres: {api_key[:8]}...)")
+        else:
+            logging.warning("OPENAI_API_KEY não está definida!")
 
         logging.info(f"Tentando conectar via IP público: {host}:{port} DB: {dbname} User: {user}")
 
