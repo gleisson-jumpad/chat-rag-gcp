@@ -1,6 +1,13 @@
-# PostgreSQL Connection Tester for Cloud Run
+# RAG System with LlamaIndex and OpenAI
 
-This application demonstrates connecting to a PostgreSQL instance on Google Cloud SQL from Cloud Run using various connection methods.
+This application implements a Retrieval-Augmented Generation (RAG) system using LlamaIndex with OpenAI integration, deployed on Google Cloud Run with PostgreSQL vector storage.
+
+## Features
+
+- Document upload and processing (PDF, TXT, DOCX, PPTX, MD, CSV)
+- Vector embedding generation with OpenAI
+- Vector storage in PostgreSQL database with pgvector
+- Document retrieval and Q&A capabilities
 
 ## Setup and Deployment
 
@@ -11,16 +18,9 @@ This application demonstrates connecting to a PostgreSQL instance on Google Clou
    pip install -r requirements.txt
    ```
 
-2. **Download the Cloud SQL Auth Proxy:**
-   For macOS:
+2. **Set environment variables:**
    ```bash
-   curl -o cloud-sql-proxy https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/v2.15.2/cloud-sql-proxy.darwin.arm64
-   chmod +x cloud-sql-proxy
-   ```
-   For other platforms, see: [Cloud SQL Auth Proxy Installation](https://cloud.google.com/sql/docs/postgres/connect-auth-proxy#install)
-
-3. **Set environment variables:**
-   ```bash
+   export OPENAI_API_KEY="your-openai-api-key"
    export INSTANCE_CONNECTION_NAME="your-project:region:instance-name"
    export PG_DB="your-database-name"
    export PG_USER="your-database-user"
@@ -28,71 +28,64 @@ This application demonstrates connecting to a PostgreSQL instance on Google Clou
    export DB_PUBLIC_IP="your-postgresql-public-ip"  # Only if using direct connection
    ```
 
-4. **Run the application:**
+3. **Run the application:**
    ```bash
    streamlit run app/main.py
    ```
 
 ### Cloud Run Deployment
 
-1. **Update your project information** in `cloud-run-deploy.sh`:
-   - Set your `PROJECT_ID`
-   - Set your desired `REGION`
-   - Verify the `INSTANCE_CONNECTION_NAME`
-   - Update database credentials
-   
-2. **Make the deployment script executable:**
+1. **Store your OpenAI API key in Secret Manager:**
    ```bash
-   chmod +x cloud-run-deploy.sh
+   gcloud secrets create openai-api-key --data-file=- <<< "your-openai-api-key"
    ```
 
-3. **Run the deployment script:**
+2. **Build and deploy with Cloud Build:**
    ```bash
-   ./cloud-run-deploy.sh
+   gcloud builds submit --config cloudbuild.yaml
    ```
 
-4. **Alternative: Deploy manually with gcloud**
+3. **Grant Secret Manager access to the service account:**
    ```bash
-   # Build the container
-   gcloud builds submit --tag gcr.io/PROJECT_ID/postgres-connection-test
-   
-   # Deploy to Cloud Run
-   gcloud run deploy postgres-connection-test \
-     --image gcr.io/PROJECT_ID/postgres-connection-test \
+   gcloud projects add-iam-policy-binding PROJECT_ID \
+     --member="serviceAccount:PROJECT_NUMBER-compute@developer.gserviceaccount.com" \
+     --role="roles/secretmanager.secretAccessor"
+   ```
+
+4. **Manual deployment (alternative):**
+   ```bash
+   gcloud run deploy chat-rag \
+     --image gcr.io/PROJECT_ID/chat-rag \
      --platform managed \
      --region REGION \
      --set-env-vars="INSTANCE_CONNECTION_NAME=PROJECT:REGION:INSTANCE" \
      --set-env-vars="PG_DB=postgres" \
      --set-env-vars="PG_USER=postgres" \
      --set-env-vars="PG_PASSWORD=your_password_here" \
+     --set-secrets="OPENAI_API_KEY=openai-api-key:latest" \
      --allow-unauthenticated \
      --add-cloudsql-instances=PROJECT:REGION:INSTANCE
    ```
 
-## Important Notes for Cloud Run
+## PostgreSQL Vector Database
 
-1. **Cloud SQL Auth Proxy:** In Cloud Run, the Cloud SQL Auth Proxy is automatically set up when you use the `--add-cloudsql-instances` flag.
+The application uses pgvector for storing and querying document embeddings. To set up:
 
-2. **Unix Socket Path:** In Cloud Run, the socket is available at `/cloudsql/INSTANCE_CONNECTION_NAME`.
+1. Ensure you have a PostgreSQL instance with pgvector extension enabled
+2. The application will automatically create the necessary vector tables when documents are processed
 
-3. **PostgreSQL Connection:** When connecting to PostgreSQL through the unix socket, use:
-   ```python
-   conn = psycopg2.connect(
-       dbname=os.getenv("PG_DB"),
-       user=os.getenv("PG_USER"),
-       password=os.getenv("PG_PASSWORD"),
-       host="/cloudsql/INSTANCE_CONNECTION_NAME"
-   )
-   ```
+## Architecture
 
-4. **Security:** Make sure your database credentials are passed securely as environment variables. Consider using Secret Manager for production deployments.
+- **Streamlit**: Web interface for document upload and Q&A
+- **LlamaIndex**: Document processing and retrieval framework
+- **OpenAI**: Embedding and LLM capabilities
+- **PostgreSQL with pgvector**: Vector storage and similarity search
 
 ## Troubleshooting
 
-If you encounter connection issues:
+If you encounter issues:
 
-1. Verify your Cloud SQL instance has the Cloud Run service account in its authorized principals.
-2. Make sure the service account has the necessary IAM permissions.
-3. Check if the Cloud SQL instance is in the same region as your Cloud Run service.
-4. Verify that your database user and password are correct.
-5. Look for the connection error message in the app or in the Cloud Run logs. 
+1. Check that all environment variables are properly set
+2. Verify PostgreSQL connectivity and pgvector extension installation
+3. Ensure your OpenAI API key is valid and has sufficient quota
+4. For Cloud Run deployments, check IAM permissions for Secret Manager and Cloud SQL access 

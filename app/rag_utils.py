@@ -4,7 +4,6 @@ from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.vector_stores.postgres import PGVectorStore
 from llama_index.core.storage.storage_context import StorageContext
 import tempfile
-from openai import OpenAI
 
 # Extensões suportadas por default
 SUPPORTED_EXTENSIONS = [".pdf", ".txt", ".docx", ".pptx", ".md", ".csv"]
@@ -61,10 +60,11 @@ def process_uploaded_file(file, session_id):
             table_name=table_name
         )
         
-        # Create embedding model with the OpenAI API key
-        # Create client first to avoid "proxies" error
-        client = OpenAI(api_key=openai_api_key)
-        embed_model = OpenAIEmbedding(model="text-embedding-ada-002")
+        # Set the OpenAI API key as environment variable
+        os.environ["OPENAI_API_KEY"] = openai_api_key
+        
+        # Initialize with minimal configuration
+        embed_model = OpenAIEmbedding()
         
         # Create service context with the embedding model
         service_context = ServiceContext.from_defaults(
