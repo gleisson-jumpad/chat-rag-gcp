@@ -6,12 +6,13 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     curl \
     wget \
-    dnsutils \ # Para 'dig'
-    iputils-ping \ # Para 'ping'
+    dnsutils \
+    iputils-ping \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 # Baixa e configura o Cloud SQL Auth Proxy (REMOVER SE NÃO FOR USAR SOCKET)
+# Comentado pois estamos na Opção 2 (IP Público)
 # RUN wget https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/v2.15.2/cloud-sql-proxy.linux.amd64 -O /app/cloud-sql-proxy
 # RUN chmod +x /app/cloud-sql-proxy
 
@@ -27,11 +28,12 @@ RUN chmod +x start.sh
 ENV PYTHONUNBUFFERED=1
 EXPOSE 8501
 
-# CMD ["./start.sh"] # Comente o CMD original temporariamente
-# Adicione um CMD de teste (rode APENAS PARA UM DEPLOY DE TESTE)
+# CMD ["./start.sh"] # CMD original comentado para teste
+
+# CMD de teste de rede (rode APENAS PARA UM DEPLOY DE TESTE)
 CMD ["bash", "-c", "echo '--- Iniciando Testes de Rede ---'; \
      echo '--- Teste DNS google.com ---'; dig google.com; \
      echo '--- Teste Ping google.com ---'; ping -c 4 google.com; \
      echo '--- Teste cURL google.com ---'; curl -v https://google.com; \
-     echo '--- Teste cURL IP DB (sem porta) ---'; curl -v telnet://34.48.95.143:5432; \
+     echo '--- Teste cURL IP DB (telnet) ---'; curl -v --connect-timeout 10 telnet://34.48.95.143:5432; \
      echo '--- Testes Concluídos, dormindo... ---'; sleep 3600"]
