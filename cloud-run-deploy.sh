@@ -19,16 +19,13 @@ gcloud run deploy $SERVICE_NAME \
   --image gcr.io/$PROJECT_ID/$SERVICE_NAME \
   --platform managed \
   --region $REGION \
-  --set-env-vars="INSTANCE_CONNECTION_NAME=${INSTANCE_CONNECTION_NAME}" \
   --set-env-vars="PG_DB=postgres" \
   --set-env-vars="PG_USER=postgres" \
   --set-env-vars="PG_PASSWORD=AMGQk@50l9Eu" \
-  --set-env-vars="VPC_CONNECTOR=cloudrun-vpc-connector" \
-  --set-env-vars="PG_HOST=/cloudsql/${INSTANCE_CONNECTION_NAME}" \
+  --set-env-vars="DB_PUBLIC_IP=34.48.95.143" \
   --allow-unauthenticated \
-  --add-cloudsql-instances=${INSTANCE_CONNECTION_NAME} \
-  --service-account="682048092511-compute@developer.gserviceaccount.com" \
   --vpc-connector=cloudrun-vpc-connector \
-  --vpc-egress=private-ranges-only
+  --vpc-egress=private-ranges-only \
+  --service-account="682048092511-compute@developer.gserviceaccount.com"
 
 echo "Deployment complete!" 
