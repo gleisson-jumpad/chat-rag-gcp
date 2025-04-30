@@ -61,7 +61,10 @@ def process_uploaded_file(file, session_id):
         )
         
         # Create embedding model with the OpenAI API key
-        embed_model = OpenAIEmbedding(api_key=openai_api_key)
+        embed_model = OpenAIEmbedding(
+            api_key=openai_api_key,
+            model="text-embedding-ada-002"  # Specify the model explicitly
+        )
         
         # Create service context with the embedding model
         service_context = ServiceContext.from_defaults(
