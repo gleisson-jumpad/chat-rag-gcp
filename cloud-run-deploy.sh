@@ -26,3 +26,4 @@ gcloud run deploy $SERVICE_NAME \
   --service-account="682048092511-compute@developer.gserviceaccount.com"
 
 echo "✅ Deployment complete!"
+echo "testando"
