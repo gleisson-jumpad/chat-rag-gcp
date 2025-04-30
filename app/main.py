@@ -171,11 +171,26 @@ elif menu == "🔍 Consulta com RAG":
     if 'multi_rag_tool' not in st.session_state:
         from multi_table_rag import MultiTableRAGTool
         with st.spinner("Inicializando ferramenta RAG multi-tabela..."):
-            st.session_state.multi_rag_tool = MultiTableRAGTool()
+            try:
+                st.session_state.multi_rag_tool = MultiTableRAGTool()
+            except Exception as init_error:
+                st.error(f"Erro ao inicializar MultiTableRAGTool: {init_error}")
+                st.warning("Verifique as configurações do banco de dados e a chave da API OpenAI.")
+                st.stop() # Stop execution if initialization fails
     
     # Display model selection in the sidebar
     with st.sidebar:
         st.subheader("Configurações do Chat")
+        
+        # --- Add Refresh Button ---
+        if st.button("🔄 Recarregar Ferramenta RAG", help="Força a reinicialização da ferramenta RAG para descobrir novas tabelas/documentos."):
+            if 'multi_rag_tool' in st.session_state:
+                del st.session_state['multi_rag_tool'] # Remove old instance
+            st.success("Ferramenta RAG reinicializada. Recarregando a página...")
+            time.sleep(1) # Brief pause
+            st.rerun()
+        st.markdown("---")
+        # ------------------------
         
         # Model selection with cleaner layout
         st.markdown("**Modelo de IA:**")

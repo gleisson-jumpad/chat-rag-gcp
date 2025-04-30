@@ -155,7 +155,8 @@ class MultiTableRAGTool:
                     "table_name": table_name,
                     "embed_dim": table_config.get("embed_dim", 1536),
                     "hybrid_search": True,  # Explicitly enable hybrid search for querying
-                    "text_search_config": table_config.get("language", "english") # Explicitly set config
+                    "text_search_config": table_config.get("language", "english"), # Explicitly set config
+                    "content_col": "text" # <--- Tell query side to use the 'text' column
                 }
                 
                 # Create embedding model
