@@ -1,19 +1,10 @@
 steps:
-  # Constrói a imagem do Docker
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-t', 'gcr.io/chat-rag-v1/chat-rag', '.']
-  
-  # Push da imagem para o Container Registry
+    args: ['build', '-t', 'us-east4-docker.pkg.dev/chat-rag-v1/chat-rag/image:latest', '.']
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', 'gcr.io/chat-rag-v1/chat-rag']
-
-# Armazena logs no bucket que você criou
-logsBucket: 'gs://chat-rag'
-
-# Configuração de opções
+    args: ['push', 'us-east4-docker.pkg.dev/chat-rag-v1/chat-rag/image:latest']
 options:
-  logging: CLOUD_LOGGING_ONLY
-
-# Define a imagem final que será usada
+  logging: GCS_ONLY
+logsBucket: "gs://chat-rag"
 images:
-  - 'gcr.io/chat-rag-v1/chat-rag'
+  - 'us-east4-docker.pkg.dev/chat-rag-v1/chat-rag/image:latest'
