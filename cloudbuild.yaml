@@ -1,42 +1,105 @@
+# cloudbuild.yaml - Configurado para chat-rag-v2 (Opção 2: IP Público)
+
 steps:
-  # Passo 1: Build da Imagem Docker (sem alterações)
+  # Passo 1: Build da Imagem Docker
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-t', 'us-east4-docker.pkg.dev/$PROJECT_ID/chat-rag/image:latest', '.']
+    args:
+      - 'build'
+      - '-t'
+      # Usa o $PROJECT_ID do build e o nome do repositório definido (ajuste se mudou)
+      - 'us-east4-docker.pkg.dev/$PROJECT_ID/chat-rag-repo-v2/image:latest'
+      - '.'
     id: Build
 
-  # Passo 2: Push da Imagem para o Artifact Registry (sem alterações)
+  # Passo 2: Push da Imagem para o Artifact Registry
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', 'us-east4-docker.pkg.dev/$PROJECT_ID/chat-rag/image:latest']
+    args:
+      - 'push'
+      # Usa o $PROJECT_ID do build e o nome do repositório definido
+      - 'us-east4-docker.pkg.dev/$PROJECT_ID/chat-rag-repo-v2/image:latest'
     id: Push
-    waitFor: ['Build']
+    waitFor: ['Build'] # Espera o passo 'Build' terminar
 
-  # --- PASSO 3: Deploy no Cloud Run (MODIFICADO PARA OPÇÃO 2 - IP PÚBLICO) ---
+  # --- PASSO 3: Deploy no Cloud Run (Configurado para OPÇÃO 2 - IP PÚBLICO) ---
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
       - 'run'
       - 'deploy'
-      - 'chat-rag' # <-- Nome do seu serviço Cloud Run
+      # Nome do serviço Cloud Run (ajuste se mudou de CLOUD_RUN_SERVICE_NAME)
+      - 'chat-rag-v2'
       - '--image'
-      - 'us-east4-docker.pkg.dev/$PROJECT_ID/chat-rag/image:latest' # <-- Imagem do passo anterior
+      # Imagem do passo anterior
+      - 'us-east4-docker.pkg.dev/$PROJECT_ID/chat-rag-repo-v2/image:latest'
       - '--platform'
       - 'managed'
-      - '--region'
-      - 'us-east4' # <-- Sua Região
+      # Região (ajuste se mudou de REGION)
+      - 'us-east4'
       # --- Variáveis de Ambiente para IP Público ---
-      - '--set-env-vars=PG_DB=postgres,PG_USER=postgres,PG_PASSWORD=AMGQk@50l9Eu,DB_PUBLIC_IP=34.48.95.143'
-        # !!! ALERTA DE SEGURANÇA: Senha no código! Use Secret Manager (veja abaixo) !!!
+      - '--set-env-vars=PG_DB=postgres,PG_USER=postgres,PG_PASSWORD=AMGQk@50l9Eu,DB_PUBLIC_IP=34.150.190.157'
+        # !!! ALERTA DE SEGURANÇA: Substitua SUA_SENHA_DEFINIDA_AQUI pela senha real!
+        # !!! RECOMENDADO: Use Secret Manager para a senha em produção!
       - '--allow-unauthenticated'
       # --- Configuração de Rede para Saída Pública ---
       - '--vpc-egress=all' # <-- PERMITE SAÍDA PARA INTERNET PÚBLICA
-      # --- Conta de Serviço (mantida) ---
-      - '--service-account=682048092511-compute@developer.gserviceaccount.com'
+      # --- Conta de Serviço (Use a padrão do Compute Engine ou crie uma dedicada) ---
+      - '--service-account=${_SERVICE_ACCOUNT_EMAIL}' # Usa substituição para flexibilidade
+
       # --- FLAGS REMOVIDAS (Não usadas na Opção 2) ---
       # REMOVIDO: --add-cloudsql-instances
       # REMOVIDO: --vpc-connector
     waitFor: ['Push'] # Espera o passo 'Push' terminar
 
+# Variáveis de ambiente globais ou configurações
 options:
   logging: CLOUD_LOGGING_ONLY
+
+# Imagens resultantes do build (opcional, mas bom para referência)
 images:
-  - 'us-east4-docker.pkg.dev/$PROJECT_ID/chat-rag/image:latest'
+  - 'us-east4-docker.pkg.dev/$PROJECT_ID/chat-rag-repo-v2/image:latest'
+
+# Substituições que podem ser passadas pelo Trigger ou comando gcloud builds submit
+# $PROJECT_ID é geralmente preenchido automaticamente pelo Cloud Build
+substitutions:
+  # Define a conta de serviço do Cloud Run a ser usada (Padrão do Compute Engine)
+  # Você pode substituir isso no trigger se usar uma conta dedicada.
+  _SERVICE_ACCOUNT_EMAIL: '${PROJECT_NUMBER}-compute@developer.gserviceaccount.com'
+  # Você pode adicionar outras substituições se necessário
+  # _REGION: 'us-east4'
+  # _SQL_INSTANCE_NAME: 'chat-rag-db-v2'
+
+
+# --- Exemplo de como usar Secret Manager (Recomendado) ---
+# 1. Crie o secret 'chat-rag-v2-pg-password' no Secret Manager com a senha.
+# 2. Dê permissão ao Cloud Build SA (<PROJECT_NUMBER>@cloudbuild.gserviceaccount.com)
+#    para acessar o secret (papel roles/secretmanager.secretAccessor).
+# 3. Modifique o passo de deploy e adicione 'availableSecrets' no final:
+
+# Exemplo do passo de deploy modificado:
+#
+#  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+#    entrypoint: gcloud
+#    args:
+#      - 'run'
+#      - 'deploy'
+#      - 'chat-rag-v2'
+#      - '--image'
+#      - 'us-east4-docker.pkg.dev/$PROJECT_ID/chat-rag-repo-v2/image:latest'
+#      - '--platform'
+#      - 'managed'
+#      - '--region'
+#      - 'us-east4'
+#      # Usa a variável injetada pelo secretEnv 'PG_PASSWORD'
+#      - '--set-env-vars=PG_DB=postgres,PG_USER=postgres,PG_PASSWORD=$$PG_PASSWORD,DB_PUBLIC_IP=34.150.190.157'
+#      - '--allow-unauthenticated'
+#      - '--vpc-egress=all'
+#      - '--service-account=${_SERVICE_ACCOUNT_EMAIL}'
+#    # Mapeia o secret para uma variável de ambiente temporária dentro do passo
+#    secretEnv: ['PG_PASSWORD']
+#    waitFor: ['Push']
+#
+# # Seção no final do arquivo cloudbuild.yaml (fora de 'steps')
+# availableSecrets:
+#   secretManager:
+#   - versionName: projects/$PROJECT_ID/secrets/chat-rag-v2-pg-password/versions/latest # <-- Use o nome do seu secret
+#     env: 'PG_PASSWORD' # <-- Nome da variável temporária

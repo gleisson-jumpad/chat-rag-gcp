@@ -2,19 +2,18 @@ FROM python:3.9-slim
 
 WORKDIR /app
 
-# Instala dependências de sistema necessárias + FERRAMENTAS DE REDE
+# Instala dependências de sistema necessárias
+# REMOVIDO ferramentas de rede extras, pois não são mais necessárias para produção
 RUN apt-get update && apt-get install -y \
     curl \
     wget \
-    dnsutils \
-    iputils-ping \
+    # dnsutils e iputils-ping removidos para imagem menor
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Baixa e configura o Cloud SQL Auth Proxy (REMOVER SE NÃO FOR USAR SOCKET)
-# Comentado pois estamos na Opção 2 (IP Público)
-# RUN wget https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/v2.15.2/cloud-sql-proxy.linux.amd64 -O /app/cloud-sql-proxy
-# RUN chmod +x /app/cloud-sql-proxy
+# Cloud SQL Auth Proxy comentado (correto para Opção 2)
+# RUN wget ...
+# RUN chmod ...
 
 # Instala as dependências Python
 COPY requirements.txt .
@@ -28,12 +27,10 @@ RUN chmod +x start.sh
 ENV PYTHONUNBUFFERED=1
 EXPOSE 8501
 
-# CMD ["./start.sh"] # CMD original comentado para teste
+# --- CORREÇÃO DO CMD ---
+# Comenta ou remove o CMD de teste de rede:
+# CMD ["bash", "-c", "echo '--- Iniciando Testes de Rede ---'; ... sleep 3600"]
 
-# CMD de teste de rede (rode APENAS PARA UM DEPLOY DE TESTE)
-CMD ["bash", "-c", "echo '--- Iniciando Testes de Rede ---'; \
-     echo '--- Teste DNS google.com ---'; dig google.com; \
-     echo '--- Teste Ping google.com ---'; ping -c 4 google.com; \
-     echo '--- Teste cURL google.com ---'; curl -v https://google.com; \
-     echo '--- Teste cURL IP DB (telnet) ---'; curl -v --connect-timeout 10 telnet://34.48.95.143:5432; \
-     echo '--- Testes Concluídos, dormindo... ---'; sleep 3600"]
+# Descomenta e ativa o CMD original para iniciar a aplicação:
+CMD ["./start.sh"]
+# ----------------------
