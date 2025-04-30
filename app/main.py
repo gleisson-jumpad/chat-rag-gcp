@@ -2,6 +2,14 @@ import streamlit as st
 import os
 import uuid
 from rag_utils import process_uploaded_file, is_supported_file, SUPPORTED_EXTENSIONS, get_existing_tables
+import time
+from llama_index.llms.openai import OpenAI as LlamaOpenAI
+from llama_index.embeddings.openai import OpenAIEmbedding
+from llama_index.core.llms import ChatMessage, MessageRole
+from llama_index.vector_stores.postgres import PGVectorStore
+from llama_index.core import VectorStoreIndex, StorageContext
+from llama_index.core.indices.query.query_transform.base import StepDecomposeQueryTransform
+from llama_index.core.query_engine import RouterQueryEngine
 
 st.set_page_config(page_title="Chat RAG", layout="wide")
 
@@ -26,6 +34,20 @@ menu = st.sidebar.radio("Navegação", [
 if menu == "🏠 Início":
     st.subheader("Bem-vindo ao sistema de RAG da Jumpad!")
     st.markdown("Use o menu lateral para navegar entre testes e funcionalidades do sistema.")
+    
+    # Add explanation about LlamaIndex and OpenAI API integration
+    st.markdown("## Sobre a Integração LlamaIndex com OpenAI API")
+    st.markdown("""
+    Este sistema utiliza LlamaIndex com integração direta à API da OpenAI para:
+    
+    1. **Processamento de Documentos**: Convertemos seus documentos em chunks e criamos embeddings usando o modelo `text-embedding-ada-002` da OpenAI.
+    
+    2. **Armazenamento de Vetores**: Os embeddings são armazenados em um banco PostgreSQL com suporte a vetores.
+    
+    3. **Consulta Semântica**: Suas perguntas são convertidas em vetores e comparadas aos documentos através de busca por similaridade.
+    
+    4. **Geração Aumentada**: O LLM da OpenAI (GPT-4o ou GPT-3.5 Turbo) recebe os fragmentos relevantes de documento para gerar respostas precisas.
+    """)
 
 elif menu == "🔌 Teste de Conexão com PostgreSQL":
     st.subheader("🔌 Teste de Conexão com o Banco")
@@ -54,17 +76,51 @@ elif menu == "📥 Upload e Vetorização de Arquivos":
             vector_tables = get_existing_tables()
             
             if vector_tables:
-                st.success(f"✅ Encontrados {len(vector_tables)} documentos previamente processados!")
+                # Connect to database to get document info
+                from db_config import get_pg_connection
+                conn = get_pg_connection()
+                cursor = conn.cursor()
                 
-                # Add existing documents to session state
+                doc_count = 0
+                unique_files = set()
+                
                 for table_name in vector_tables:
-                    # Add to session state if not already there
-                    if table_name not in [f['table'] for f in st.session_state.uploaded_files]:
-                        st.session_state.uploaded_files.append({
-                            'name': f"Documento {table_name.split('_')[1][:8]}",
-                            'size': 0,  # Unknown size for existing documents
-                            'table': table_name
-                        })
+                    try:
+                        # Query to extract file names from metadata_
+                        cursor.execute(f"""
+                            SELECT DISTINCT metadata_->>'file_name' as file_name 
+                            FROM {table_name}
+                            WHERE metadata_->>'file_name' IS NOT NULL
+                        """)
+                        
+                        # Get unique filenames
+                        distinct_files = cursor.fetchall()
+                        
+                        if distinct_files:
+                            for file_info in distinct_files:
+                                file_name = file_info[0] if file_info[0] else f"Documento {doc_count+1}"
+                                
+                                # Only add if we haven't seen this file before
+                                if file_name not in unique_files:
+                                    unique_files.add(file_name)
+                                    
+                                    # Add document info to session state
+                                    st.session_state.uploaded_files.append({
+                                        'name': file_name,
+                                        'size': 0,
+                                        'table': table_name,
+                                        'file_id': f"{table_name}_{doc_count}"
+                                    })
+                                    doc_count += 1
+                    except Exception as e:
+                        st.warning(f"Erro ao extrair informações da tabela {table_name}: {str(e)}")
+                
+                cursor.close()
+                conn.close()
+                
+                st.success(f"✅ Encontrados {len(st.session_state.uploaded_files)} documentos processados!")
+            else:
+                st.warning("Nenhuma tabela de vetores encontrada no banco de dados.")
         except Exception as e:
             st.warning(f"Não foi possível verificar documentos existentes: {str(e)}")
     
@@ -105,22 +161,19 @@ elif menu == "📥 Upload e Vetorização de Arquivos":
             st.write(f"{idx+1}. **{file_info['name']}** - Tabela: {file_info['table']}")
 
 elif menu == "🔍 Consulta com RAG":
-    st.subheader("💬 ChatRAG")
+    st.subheader("💬 ChatRAG Multi-Tabela")
     
     # Initialize chat history if it doesn't exist
     if 'messages' not in st.session_state:
         st.session_state.messages = []
+        
+    # Initialize multi-table RAG tool if not already done
+    if 'multi_rag_tool' not in st.session_state:
+        from multi_table_rag import MultiTableRAGTool
+        with st.spinner("Inicializando ferramenta RAG multi-tabela..."):
+            st.session_state.multi_rag_tool = MultiTableRAGTool()
     
-    # Initialize session state for uploaded files if needed
-    if 'uploaded_files' not in st.session_state:
-        st.session_state.uploaded_files = []
-    
-    # Default RAG setting
-    use_rag = True
-    selected_file_names = []
-    selected_tables = []
-    
-    # Add OpenAI model selection in the sidebar
+    # Display model selection in the sidebar
     with st.sidebar:
         st.subheader("Configurações do Chat")
         
@@ -139,99 +192,54 @@ elif menu == "🔍 Consulta com RAG":
         )
         model_id = model_options[selected_model]
         
-        # RAG toggle with cleaner layout
+        # Multi-RAG info
         st.markdown("---")
-        st.markdown("**Conhecimento dos Documentos:**")
-        use_rag = st.toggle("Usar RAG", value=True)
-    
-    # Check for documents and load them if necessary (but don't show messages)
-    if use_rag and len(st.session_state.uploaded_files) == 0:
-        with st.spinner("Carregando documentos..."):
-            try:
-                from rag_utils import get_existing_tables
-                vector_tables = get_existing_tables()
-                
-                if vector_tables:
-                    # Connect to database to get document info
-                    from db_config import get_pg_connection
-                    conn = get_pg_connection()
-                    cursor = conn.cursor()
-                    
-                    doc_count = 0
-                    
-                    for table_name in vector_tables:
-                        try:
-                            # Query to count distinct documents in the table
-                            cursor.execute(f"""
-                                SELECT DISTINCT metadata_->>'file_name' as file_name 
-                                FROM {table_name}
-                            """)
-                            
-                            # Get unique filenames
-                            distinct_files = cursor.fetchall()
-                            
-                            if distinct_files:
-                                for file_info in distinct_files:
-                                    file_name = file_info[0] if file_info[0] else f"Documento {doc_count+1}"
-                                    
-                                    # Add document info to session state
-                                    st.session_state.uploaded_files.append({
-                                        'name': file_name,
-                                        'size': 0,
-                                        'table': table_name,
-                                        'file_id': f"{table_name}_{doc_count}"
-                                    })
-                                    doc_count += 1
-                        except Exception as e:
-                            pass
-                    
-                    cursor.close()
-                    conn.close()
-                    
-                    st.rerun()
-                else:
-                    use_rag = False
-            except Exception as e:
-                use_rag = False
-    
-    # Update sidebar with document selection if documents are available
-    with st.sidebar:
-        # Show documents if available
-        if st.session_state.uploaded_files and use_rag:
-            # Get unique files
-            unique_files = []
-            for f in st.session_state.uploaded_files:
-                if f["name"] not in [uf["name"] for uf in unique_files]:
-                    unique_files.append(f)
+        st.info(
+            "ℹ️ **Sobre o RAG Multi-Tabela:**\n\n"
+            "Este modo avançado permite que a IA busque em múltiplas tabelas de vetores simultaneamente. "
+            "O sistema decidirá automaticamente quais tabelas são relevantes para sua consulta "
+            "e combinará as informações encontradas em uma resposta coerente."
+        )
+        
+        # Get tables information
+        tables_info = st.session_state.multi_rag_tool.get_tables_info()
+        tables = tables_info["tables"]
+        
+        # Display all tables and their files
+        if tables:
+            st.markdown("---")
+            st.markdown(f"🗃️ **Tabelas Disponíveis:** {len(tables)}")
             
-            st.markdown(f"📚 **Documentos Disponíveis:** {len(unique_files)}")
+            with st.expander("Ver detalhes das tabelas"):
+                for idx, table in enumerate(tables):
+                    st.markdown(f"**{idx+1}. {table['name']}**")
+                    st.markdown(f"- Descrição: {table['description']}")
+                    st.markdown(f"- Documentos: {table['doc_count']}")
+                    st.markdown(f"- Chunks: {table['chunk_count']}")
+                    
+                    # Show files in this table
+                    if 'files' in table and table['files']:
+                        st.markdown("**Arquivos:**")
+                        for file in table['files']:
+                            st.markdown(f"- {file}")
+                    
+                    st.markdown("---")
+        else:
+            st.warning("⚠️ Nenhuma tabela de vetores encontrada")
+        
+        # Display files in database
+        files_info = st.session_state.multi_rag_tool.get_files_in_database()
+        all_files = files_info["all_files"]
+        
+        if all_files:
+            st.markdown("---")
+            st.markdown(f"📚 **Documentos Disponíveis:** {len(all_files)}")
             
-            # Multi-select for documents with cleaner styling
-            file_options = [f["name"] for f in unique_files]
-            
-            # Use custom container for better styling
-            selection_container = st.container(border=True)
-            with selection_container:
-                st.markdown("**Selecione os documentos:**")
-                
-                # Create checkboxes for each file
-                selected_file_names = []
-                selected_files = []
-                for file_name in file_options:
-                    if st.checkbox(file_name, value=True):
-                        selected_file_names.append(file_name)
-                        # Get all files with this name
-                        selected_files.extend([f for f in st.session_state.uploaded_files if f["name"] == file_name])
-                
-                # Get tables from selected files        
-                selected_tables = [f["table"] for f in selected_files]
-            
-            if not selected_file_names:
-                st.warning("⚠️ Nenhum documento selecionado")
-                use_rag = False
-        elif use_rag:
-            st.warning("⚠️ Nenhum documento disponível")
-            use_rag = False
+            with st.expander("Ver todos os documentos"):
+                for file in sorted(all_files):
+                    st.markdown(f"- {file}")
+        else:
+            st.warning("⚠️ Nenhum documento encontrado na base de dados")
         
         # Add reset button at the bottom of sidebar
         st.markdown("---")
@@ -239,304 +247,49 @@ elif menu == "🔍 Consulta com RAG":
             st.session_state.messages = []
             st.rerun()
     
-    # Main chat area - style with a light background
-    chat_container = st.container(border=False)
-    with chat_container:
-        # Display chat messages in a scrollable area
-        st.markdown("### Conversa")
-        message_container = st.container(height=400, border=True)
-        with message_container:
-            for message in st.session_state.messages:
-                with st.chat_message(message["role"]):
-                    st.markdown(message["content"])
-        
-        # Chat input at the bottom
-        st.markdown("### Digite sua pergunta")
-        prompt = st.chat_input("Converse com o sistema...")
-        
-        if prompt:
-            # Add user message to chat history
-            st.session_state.messages.append({"role": "user", "content": prompt})
-            
-            # Display user message immediately 
-            st.rerun()
+    # Display chat messages from history
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
     
-    # Process the last message if it's from the user and hasn't been answered yet
-    if (st.session_state.messages and 
-        len(st.session_state.messages) % 2 == 1 and 
-        st.session_state.messages[-1]["role"] == "user"):
+    # Accept user input
+    user_query = st.chat_input("Sua pergunta:")
+    
+    if user_query:
+        # Import the multi-table RAG processing function
+        from multi_table_rag import process_message_with_multi_rag
         
-        # Get the last message
-        last_message = st.session_state.messages[-1]["content"]
+        # Add user message to chat history
+        st.session_state.messages.append({"role": "user", "content": user_query})
         
-        # Display assistant response in chat message container
-        with chat_container:
-            with st.chat_message("assistant"):
-                message_placeholder = st.empty()
-                full_response = ""
+        # Display user message in chat
+        with st.chat_message("user"):
+            st.markdown(user_query)
+        
+        # Display assistant response
+        with st.chat_message("assistant"):
+            message_placeholder = st.empty()
+            message_placeholder.markdown("🔍 Analisando sua pergunta...")
+            
+            try:
+                # Process message with multi-table RAG
+                with st.spinner("Consultando múltiplas bases de conhecimento..."):
+                    response = process_message_with_multi_rag(
+                        user_query, 
+                        st.session_state.multi_rag_tool,
+                        model=model_id
+                    )
                 
-                # Show a spinner while processing
-                with st.spinner("Gerando resposta..."):
-                    try:
-                        from llama_index.llms.openai import OpenAI
-                        
-                        # Initialize LLM with selected model
-                        llm = OpenAI(model=model_id)
-                        
-                        # Define simple greeting patterns
-                        simple_greetings = [
-                            "oi", "olá", "ola", "bom dia", "boa tarde", "boa noite", 
-                            "hello", "hi", "hey", "good morning", "good afternoon", 
-                            "good evening", "tudo bem", "como vai"
-                        ]
-                        
-                        # Check if the query is a simple greeting
-                        is_simple_greeting = False
-                        clean_message = last_message.lower().strip()
-                        
-                        for greeting in simple_greetings:
-                            if greeting in clean_message or clean_message == greeting:
-                                is_simple_greeting = True
-                                break
-                        
-                        # For simple greetings, don't use RAG
-                        if is_simple_greeting or not use_rag or not selected_file_names:
-                            # Use regular chat without RAG
-                            from llama_index.core.llms import ChatMessage, MessageRole
-                            
-                            # Convert session history to format expected by LlamaIndex
-                            chat_history = []
-                            for msg in st.session_state.messages[:-1]:  # Exclude the current message
-                                role = MessageRole.USER if msg["role"] == "user" else MessageRole.ASSISTANT
-                                chat_history.append(ChatMessage(role=role, content=msg["content"]))
-                            
-                            # Get streaming chat response
-                            response = llm.stream_chat(
-                                messages=[
-                                    *chat_history,
-                                    ChatMessage(role=MessageRole.USER, content=last_message)
-                                ]
-                            )
-                            
-                            # Stream the response
-                            for chunk in response:
-                                if chunk.delta:
-                                    full_response += chunk.delta
-                                    message_placeholder.markdown(full_response + "▌")
-                        elif use_rag and st.session_state.uploaded_files and selected_file_names:
-                            # Add a debugging message
-                            message_placeholder.markdown("🔍 Consultando documentos... Por favor aguarde.")
-                            
-                            # First, attempt a direct SQL query to get context content
-                            try:
-                                from db_config import get_pg_connection
-                                conn = get_pg_connection()
-                                cursor = conn.cursor()
-                                
-                                # Execute a search query to get text context
-                                search_terms = last_message.lower().split()
-                                results = []
-                                
-                                for table_name in selected_tables:
-                                    # Log the query attempt
-                                    try:
-                                        # Query to get document content with manual search
-                                        cursor.execute(f"""
-                                            SELECT content, metadata_->>'file_name' as filename
-                                            FROM {table_name}
-                                            LIMIT 5;
-                                        """)
-                                        
-                                        # Get unique filenames
-                                        query_results = cursor.fetchall()
-                                        
-                                        if query_results:
-                                            for result in query_results:
-                                                content = result[0] if result[0] else ""
-                                                filename = result[1] if result[1] else "Unknown"
-                                                results.append({"content": content, "filename": filename})
-                                    except Exception as e:
-                                        message_placeholder.markdown(f"⚠️ Erro ao consultar tabela {table_name}: {str(e)}")
-                                
-                                cursor.close()
-                                conn.close()
-                                
-                                # If we have results, use them to generate response
-                                if results:
-                                    # Combine content to create context
-                                    context = "\n\n".join([f"De {r['filename']}:\n{r['content']}" for r in results])
-                                    
-                                    # Format the context and question for the LLM
-                                    formatted_prompt = f"""
-                                    Baseado no seguinte contexto:
-                                    
-                                    {context}
-                                    
-                                    Por favor, responda esta pergunta: {last_message}
-                                    
-                                    Dê sua resposta baseada APENAS nas informações do contexto fornecido. Se a resposta não estiver no contexto, diga "Não tenho essa informação no contexto fornecido."
-                                    """
-                                    
-                                    # Get response from LLM
-                                    from llama_index.core.llms import ChatMessage, MessageRole
-                                    chat_response = llm.complete(formatted_prompt)
-                                    
-                                    # Stream the response
-                                    for char in chat_response.text:
-                                        full_response += char
-                                        message_placeholder.markdown(full_response + "▌")
-                                    
-                                    # Final update without cursor
-                                    message_placeholder.markdown(full_response)
-                                else:
-                                    # No results found, try RAG approach
-                                    message_placeholder.markdown("⚠️ Sem resultados diretos. Tentando approach RAG avançado...")
-                                    
-                                    # Use RAG for response with standard approach
-                                    from llama_index.vector_stores.postgres import PGVectorStore
-                                    from llama_index.core import VectorStoreIndex, StorageContext
-                                    from llama_index.embeddings.openai import OpenAIEmbedding
-                                    from llama_index.core.indices.query.query_transform.base import StepDecomposeQueryTransform
-                                    from llama_index.core.query_engine import RouterQueryEngine
-                                    
-                                    # Set up connection parameters
-                                    conn_params = {
-                                        "host": "34.150.190.157",
-                                        "port": 5432, 
-                                        "dbname": "postgres",
-                                        "user": "llamaindex",
-                                        "password": "password123"
-                                    }
-                                    
-                                    # Create embedding model
-                                    embed_model = OpenAIEmbedding(model="text-embedding-ada-002")
-                                    
-                                    try:
-                                        # If only one document was selected
-                                        if len(selected_file_names) == 1 and len(selected_tables) > 0:
-                                            table_name = selected_tables[0]
-                                            
-                                            # Create vector store
-                                            vector_store = PGVectorStore.from_params(
-                                                host=conn_params["host"],
-                                                port=conn_params["port"],
-                                                database=conn_params["dbname"],
-                                                user=conn_params["user"],
-                                                password=conn_params["password"],
-                                                table_name=table_name,
-                                                embed_dim=1536
-                                            )
-                                            
-                                            # Create storage context and index
-                                            storage_context = StorageContext.from_defaults(vector_store=vector_store)
-                                            index = VectorStoreIndex.from_vector_store(
-                                                vector_store,
-                                                embed_model=embed_model
-                                            )
-                                            
-                                            # Create query engine with streaming
-                                            query_engine = index.as_query_engine(
-                                                llm=llm,
-                                                streaming=True,
-                                                similarity_top_k=3
-                                            )
-                                        else:
-                                            # If multiple documents were selected, create a router
-                                            # Create a query engine for each selected document
-                                            query_engines = {}
-                                            
-                                            # Using unique combinations of file names and tables
-                                            file_tables = list(zip(selected_file_names, selected_tables))
-                                            for i, (file_name, table) in enumerate(file_tables):
-                                                # Create vector store for this document
-                                                vector_store = PGVectorStore.from_params(
-                                                    host=conn_params["host"],
-                                                    port=conn_params["port"],
-                                                    database=conn_params["dbname"],
-                                                    user=conn_params["user"],
-                                                    password=conn_params["password"],
-                                                    table_name=table,
-                                                    embed_dim=1536
-                                                )
-                                                
-                                                # Create index
-                                                storage_context = StorageContext.from_defaults(vector_store=vector_store)
-                                                index = VectorStoreIndex.from_vector_store(
-                                                    vector_store,
-                                                    embed_model=embed_model
-                                                )
-                                                
-                                                # Create query engine
-                                                query_engines[f"{file_name}_{i}"] = index.as_query_engine(
-                                                    llm=llm,
-                                                    similarity_top_k=3
-                                                )
-                                            
-                                            # Create step decompose transform
-                                            step_decompose_transform = StepDecomposeQueryTransform(
-                                                llm=llm,
-                                                verbose=True
-                                            )
-                                            
-                                            # Create router query engine
-                                            query_engine = RouterQueryEngine(
-                                                selector="llm",
-                                                query_engines=query_engines,
-                                                llm=llm,
-                                                query_transform=step_decompose_transform
-                                            )
-                                        
-                                        # Execute query
-                                        response = query_engine.query(last_message)
-                                        
-                                        # Stream the response
-                                        if hasattr(response, 'response_gen'):
-                                            # For streaming response
-                                            for token in response.response_gen:
-                                                full_response += token
-                                                message_placeholder.markdown(full_response + "▌")
-                                        else:
-                                            # For non-streaming response (like from RouterQueryEngine)
-                                            full_response = str(response)
-                                            message_placeholder.markdown(full_response)
-                                            
-                                    except Exception as e:
-                                        # Fall back to regular chat without RAG
-                                        from llama_index.core.llms import ChatMessage, MessageRole
-                                        
-                                        # Convert session history to format expected by LlamaIndex
-                                        chat_history = []
-                                        for msg in st.session_state.messages[:-1]:  # Exclude the current message
-                                            role = MessageRole.USER if msg["role"] == "user" else MessageRole.ASSISTANT
-                                            chat_history.append(ChatMessage(role=role, content=msg["content"]))
-                                        
-                                        # Get streaming chat response
-                                        response = llm.stream_chat(
-                                            messages=[
-                                                *chat_history,
-                                                ChatMessage(role=MessageRole.USER, content=last_message)
-                                            ]
-                                        )
-                                        
-                                        # Stream the response
-                                        for chunk in response:
-                                            if chunk.delta:
-                                                full_response += chunk.delta
-                                                message_placeholder.markdown(full_response + "▌")
-                        
-                        # Display final response without cursor
-                        message_placeholder.markdown(full_response)
-                        
-                        # Add assistant response to chat history
-                        st.session_state.messages.append({"role": "assistant", "content": full_response})
-                        
-                    except Exception as e:
-                        error_message = f"Desculpe, ocorreu um erro: {str(e)}"
-                        message_placeholder.markdown(error_message)
-                        st.session_state.messages.append({"role": "assistant", "content": error_message})
-                        
-                    # Rerun to update the UI
-                    st.rerun()
+                # Display the response
+                message_placeholder.markdown(response)
+                
+                # Add assistant response to chat history
+                st.session_state.messages.append({"role": "assistant", "content": response})
+            
+            except Exception as e:
+                error_message = f"❌ **Erro ao processar a mensagem:** {str(e)}"
+                message_placeholder.markdown(error_message)
+                st.session_state.messages.append({"role": "assistant", "content": error_message})
 
 elif menu == "🧪 Diagnóstico Avançado":
     st.subheader("🧪 Diagnóstico e Depuração")
@@ -673,3 +426,221 @@ elif menu == "🧪 Diagnóstico Avançado":
             conn.close()
         except Exception as e:
             st.error(f"❌ Erro ao executar a consulta: {str(e)}")
+
+    # Add Direct Document Access Test
+    st.subheader("Teste de Acesso Direto a Documentos")
+    
+    # Only show if the multi-RAG tool is initialized
+    if 'multi_rag_tool' in st.session_state:
+        try:
+            # Get available documents
+            files_info = st.session_state.multi_rag_tool.get_files_in_database()
+            all_files = files_info["all_files"]
+            
+            if all_files:
+                # Document selector
+                selected_doc = st.selectbox(
+                    "Selecione um documento para testar:",
+                    options=sorted(all_files)
+                )
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    # Verify document vectors button
+                    if st.button("Verificar Vetores do Documento"):
+                        with st.spinner(f"Verificando vetores para '{selected_doc}'..."):
+                            vector_info = st.session_state.multi_rag_tool.verify_document_vectors(selected_doc)
+                            
+                            if "error" in vector_info:
+                                st.error(f"Erro ao verificar vetores: {vector_info['error']}")
+                            else:
+                                st.success(f"✅ Verificação completa para '{selected_doc}'")
+                                
+                                # Display vector counts
+                                st.info(f"Total de vetores: {vector_info['total_vectors']}")
+                                
+                                # Display counts by table
+                                for table, count in vector_info['vector_counts'].items():
+                                    st.write(f"- **{table}**: {count} vetores")
+                                
+                                # Show sample content if available
+                                if any(samples for samples in vector_info['sample_contents'].values()):
+                                    with st.expander("Ver amostras de conteúdo"):
+                                        for table, samples in vector_info['sample_contents'].items():
+                                            if samples:
+                                                st.write(f"**Amostras da tabela {table}:**")
+                                                for sample in samples:
+                                                    st.code(sample['content_preview'], language="text")
+                
+                with col2:
+                    # Direct document summary button
+                    if st.button("Resumir Documento Diretamente"):
+                        with st.spinner(f"Gerando resumo para '{selected_doc}'..."):
+                            try:
+                                # Use our direct document summary method
+                                summary_result = st.session_state.multi_rag_tool.summarize_document(selected_doc)
+                                
+                                if "error" in summary_result:
+                                    st.error(f"Erro ao resumir documento: {summary_result['error']}")
+                                    st.warning(summary_result.get("message", ""))
+                                else:
+                                    st.success(f"✅ Resumo gerado para '{selected_doc}'")
+                                    
+                                    # Display the summary
+                                    st.markdown("### Resumo do Documento")
+                                    st.markdown(summary_result["answer"])
+                                    
+                                    # Show sources if available
+                                    if summary_result.get("sources"):
+                                        with st.expander(f"Ver fontes ({len(summary_result['sources'])} trechos)"):
+                                            for i, source in enumerate(summary_result["sources"]):
+                                                st.markdown(f"**Trecho {i+1}** ({source.get('file_name', 'unknown')})")
+                                                st.code(source.get('text', ''), language="text")
+                            except Exception as e:
+                                st.error(f"Erro ao resumir documento: {str(e)}")
+            else:
+                st.warning("⚠️ Nenhum documento encontrado na base de dados.")
+        except Exception as e:
+            st.error(f"Erro ao acessar documentos: {str(e)}")
+    else:
+        st.warning("⚠️ Ferramenta RAG não está inicializada. Navegue para a página 'Consulta com RAG' primeiro.")
+
+    # Add RAG Configuration Verification
+    st.subheader("Verificação da Configuração RAG")
+    
+    if 'multi_rag_tool' in st.session_state:
+        if st.button("Verificar Configuração do RAG"):
+            with st.spinner("Verificando configuração do RAG..."):
+                try:
+                    config_results = st.session_state.multi_rag_tool.verify_configuration()
+                    
+                    # Display status
+                    if config_results["status"] == "ok":
+                        st.success("✅ Todas as verificações passaram com sucesso!")
+                    elif config_results["status"] == "warning":
+                        st.warning("⚠️ Avisos detectados na configuração")
+                    else:
+                        st.error("❌ Erros encontrados na configuração")
+                    
+                    # Display errors if any
+                    if config_results["errors"]:
+                        st.error("Problemas encontrados:")
+                        for error in config_results["errors"]:
+                            st.markdown(f"- {error}")
+                    
+                    # Display configuration details
+                    st.info("Detalhes da configuração:")
+                    st.json(config_results["details"])
+                except Exception as e:
+                    st.error(f"Erro durante a verificação: {str(e)}")
+    else:
+        st.warning("⚠️ Ferramenta RAG não está inicializada. Navegue para a página 'Consulta com RAG' primeiro.")
+
+    # Add Debug Document Summarization
+    st.subheader("Debug de Resumo de Documentos")
+    
+    if 'multi_rag_tool' in st.session_state:
+        st.info("Esta seção permite testar diretamente a funcionalidade de resumo de documentos. Útil para depuração quando os resumos via chat não funcionam corretamente.")
+        
+        # Get available documents
+        files_info = {}
+        try:
+            files_info = st.session_state.multi_rag_tool.get_files_in_database()
+            all_files = files_info["all_files"]
+            
+            if all_files:
+                # Document selector
+                selected_doc = st.selectbox(
+                    "Selecione um documento para resumir:",
+                    options=sorted(all_files)
+                )
+                
+                if st.button("Resumir Documento Selecionado"):
+                    with st.spinner(f"Gerando resumo para '{selected_doc}'..."):
+                        try:
+                            # Use our direct document summary method
+                            summary_result = st.session_state.multi_rag_tool.summarize_document(selected_doc)
+                            
+                            if "error" in summary_result:
+                                st.error(f"Erro ao resumir documento: {summary_result['error']}")
+                                st.warning(summary_result.get("message", ""))
+                            else:
+                                st.success(f"✅ Resumo gerado para '{selected_doc}'")
+                                
+                                # Display the summary
+                                st.markdown("### Resumo do Documento")
+                                st.markdown(summary_result["answer"])
+                                
+                                # Show sources if available
+                                if summary_result.get("sources"):
+                                    with st.expander(f"Ver fontes ({len(summary_result['sources'])} trechos)"):
+                                        for i, source in enumerate(summary_result["sources"]):
+                                            st.markdown(f"**Trecho {i+1}** ({source.get('file_name', 'unknown')})")
+                                            st.code(source.get('text', ''), language="text")
+                        except Exception as e:
+                            st.error(f"Erro ao resumir documento: {str(e)}")
+            else:
+                st.warning("Nenhum documento encontrado na base de dados.")
+                
+                # Provide diagnostic information
+                st.markdown("### Informações de Diagnóstico")
+                st.json(files_info)
+                
+                # Try to check database directly for documents
+                try:
+                    from db_config import get_pg_connection
+                    conn = get_pg_connection()
+                    cursor = conn.cursor()
+                    
+                    st.markdown("### Verificando Tabelas no Banco de Dados")
+                    # List vector tables
+                    cursor.execute("""
+                        SELECT table_name FROM information_schema.tables 
+                        WHERE table_schema = 'public' AND 
+                        (table_name LIKE 'vectors_%' OR table_name LIKE 'data_vectors_%')
+                    """)
+                    
+                    tables = cursor.fetchall()
+                    if tables:
+                        st.success(f"Encontradas {len(tables)} tabelas de vetores:")
+                        
+                        for table in tables:
+                            table_name = table[0]
+                            st.write(f"**Tabela:** {table_name}")
+                            
+                            # Get document counts
+                            cursor.execute(f"""
+                                SELECT COUNT(DISTINCT metadata_->>'file_name') 
+                                FROM {table_name}
+                                WHERE metadata_->>'file_name' IS NOT NULL
+                            """)
+                            
+                            count = cursor.fetchone()[0]
+                            st.write(f"Documentos distintos: {count}")
+                            
+                            # Get document names
+                            if count > 0:
+                                cursor.execute(f"""
+                                    SELECT DISTINCT metadata_->>'file_name' as file_name
+                                    FROM {table_name}
+                                    WHERE metadata_->>'file_name' IS NOT NULL
+                                """)
+                                
+                                doc_names = cursor.fetchall()
+                                if doc_names:
+                                    st.write("Documentos encontrados:")
+                                    for doc in doc_names:
+                                        st.write(f"- {doc[0]}")
+                    else:
+                        st.warning("Nenhuma tabela de vetores encontrada no banco de dados.")
+                    
+                    cursor.close()
+                    conn.close()
+                    
+                except Exception as e:
+                    st.error(f"Erro ao consultar diretamente o banco: {str(e)}")
+        except Exception as e:
+            st.error(f"Erro ao acessar informações de documentos: {str(e)}")
+    else:
+        st.warning("⚠️ Ferramenta RAG não está inicializada. Navegue para a página 'Consulta com RAG' primeiro.")

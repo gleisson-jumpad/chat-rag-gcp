@@ -4,6 +4,8 @@ from llama_index.core.settings import Settings
 from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.vector_stores.postgres import PGVectorStore
 from llama_index.core.storage.storage_context import StorageContext
+from llama_index.llms.openai import OpenAI
+from llama_index.core.node_parser import SentenceSplitter
 import tempfile
 import logging
 import psycopg2
@@ -18,12 +20,93 @@ def is_supported_file(filename):
     _, ext = os.path.splitext(filename)
     return ext.lower() in SUPPORTED_EXTENSIONS
 
+class PostgresRAGManager:
+    """
+    Class to manage RAG functionality with PostgreSQL and LlamaIndex
+    """
+    def __init__(self, session_id):
+        self.session_id = session_id
+        self.table_name = f"vectors_{session_id.replace('-', '_')}"
+        self.openai_api_key = os.getenv("OPENAI_API_KEY")
+        if not self.openai_api_key:
+            raise ValueError("OPENAI_API_KEY não está definida no ambiente.")
+        
+        # Set OpenAI API key in environment
+        os.environ["OPENAI_API_KEY"] = self.openai_api_key
+        
+        # Get database connection parameters
+        self.host = os.getenv("DB_PUBLIC_IP", "34.150.190.157")
+        self.port = int(os.getenv("PG_PORT", 5432))
+        self.dbname = os.getenv("PG_DB", "postgres")
+        self.user = os.getenv("PG_USER", "llamaindex")
+        self.password = os.getenv("PG_PASSWORD", "password123")
+        
+        # Initialize components
+        self.embed_model = OpenAIEmbedding(model="text-embedding-ada-002")
+        self.vector_store = None
+        self.index = None
+        
+    def setup_vector_store(self):
+        """Set up the PostgreSQL vector store with advanced configuration"""
+        try:
+            logging.info(f"Creating PGVectorStore with params: host={self.host}, port={self.port}, db={self.dbname}, user={self.user}")
+            
+            # Create vector store with advanced configuration
+            self.vector_store = PGVectorStore.from_params(
+                host=self.host,
+                port=self.port,
+                database=self.dbname,
+                user=self.user,
+                password=self.password,
+                table_name=self.table_name,
+                embed_dim=1536,     # OpenAI embedding dimension
+                use_jsonb=True,     # Use JSONB for metadata storage
+                hybrid_search=True, # Enable hybrid search capability
+                text_search_config="english", # Text search configuration
+                hnsw_kwargs={       # HNSW index configuration for faster searches
+                    "hnsw_m": 16,
+                    "hnsw_ef_construction": 64,
+                    "hnsw_ef_search": 40,
+                    "hnsw_dist_method": "vector_cosine_ops"
+                }
+            )
+            
+            logging.info(f"Successfully created PGVectorStore for table {self.table_name}")
+            return True
+        except Exception as e:
+            logging.error(f"Error setting up vector store: {str(e)}")
+            raise
+
+    def create_index_from_documents(self, docs):
+        """Create a vector index from documents"""
+        try:
+            # Set up node parser with specific parameters
+            node_parser = SentenceSplitter(
+                chunk_size=1024,
+                chunk_overlap=200,
+                paragraph_separator="\n\n",
+                include_metadata=True
+            )
+            
+            # Set up storage context
+            storage_context = StorageContext.from_defaults(vector_store=self.vector_store)
+            
+            # Create index with specific settings
+            self.index = VectorStoreIndex.from_documents(
+                docs,
+                storage_context=storage_context,
+                embed_model=self.embed_model,
+                transformations=[node_parser],
+                show_progress=True
+            )
+            
+            return self.index
+        except Exception as e:
+            logging.error(f"Error creating index: {str(e)}")
+            raise
+
 def process_uploaded_file(file, session_id):
-    # Ensure OpenAI API key is set
-    openai_api_key = os.getenv("OPENAI_API_KEY")
-    if not openai_api_key:
-        raise ValueError("OPENAI_API_KEY não está definida no ambiente.")
-    
+    """Process an uploaded file and create a vector index"""
     # Create a temporary directory to store the uploaded file
     with tempfile.TemporaryDirectory() as temp_dir:
         # Save the uploaded file to the temporary directory
@@ -34,53 +117,14 @@ def process_uploaded_file(file, session_id):
         # Load documents using LlamaIndex
         docs = SimpleDirectoryReader(input_files=[filepath]).load_data()
         
-        # Get database connection parameters from environment variables
-        host = os.getenv("DB_PUBLIC_IP", "34.150.190.157")
-        port = int(os.getenv("PG_PORT", 5432))
-        dbname = os.getenv("PG_DB", "postgres")
-        user = os.getenv("PG_USER", "llamaindex") 
-        password = os.getenv("PG_PASSWORD", "password123")
+        # Initialize RAG manager
+        rag_manager = PostgresRAGManager(session_id)
         
-        # Create table name with session ID to prevent collisions
-        table_name = f"vectors_{session_id.replace('-', '_')}"
-        
-        try:
-            # Log connection details (without password)
-            logging.info(f"Creating PGVectorStore with params: host={host}, port={port}, db={dbname}, user={user}")
-            
-            # Simplest approach: Create PGVectorStore with basic parameters
-            vector_store = PGVectorStore.from_params(
-                host=host,
-                port=port,
-                database=dbname,
-                user=user,
-                password=password,
-                table_name=table_name,
-                embed_dim=1536,  # OpenAI dimension
-                use_jsonb=False  # Use simpler storage format
-            )
-            
-            logging.info(f"Successfully created PGVectorStore for table {table_name}")
-            
-        except Exception as e:
-            logging.error(f"ERROR setting up database: {str(e)}")
-            raise
-        
-        # Set the OpenAI API key as environment variable
-        os.environ["OPENAI_API_KEY"] = openai_api_key
-        
-        # Create embedding model with explicit model name
-        embed_model = OpenAIEmbedding(model="text-embedding-ada-002")
-        
-        # Create storage context with the vector store
-        storage_context = StorageContext.from_defaults(vector_store=vector_store)
+        # Set up vector store
+        rag_manager.setup_vector_store()
         
         # Create index from documents
-        index = VectorStoreIndex.from_documents(
-            docs, 
-            storage_context=storage_context,
-            embed_model=embed_model
-        )
+        index = rag_manager.create_index_from_documents(docs)
         
         return index
 
@@ -106,3 +150,84 @@ def get_existing_tables():
     except Exception as e:
         logging.error(f"Error retrieving existing tables: {str(e)}")
         return []
+
+def create_query_engine(model_id, table_name, similarity_top_k=3):
+    """Create a query engine for a specific table"""
+    try:
+        # Initialize components needed for query engine
+        openai_api_key = os.getenv("OPENAI_API_KEY")
+        if not openai_api_key:
+            raise ValueError("OPENAI_API_KEY não está definida no ambiente.")
+        
+        # Set OpenAI API key in environment
+        os.environ["OPENAI_API_KEY"] = openai_api_key
+        
+        # Get database connection parameters
+        host = os.getenv("DB_PUBLIC_IP", "34.150.190.157")
+        port = int(os.getenv("PG_PORT", 5432))
+        dbname = os.getenv("PG_DB", "postgres")
+        user = os.getenv("PG_USER", "llamaindex")
+        password = os.getenv("PG_PASSWORD", "password123")
+        
+        logging.info(f"Creating query engine for table: {table_name} with model: {model_id}")
+        
+        # Create LLM
+        llm = OpenAI(model=model_id)
+        
+        # Create embedding model
+        embed_model = OpenAIEmbedding(model="text-embedding-ada-002")
+        
+        # Check if table exists
+        conn = get_pg_connection()
+        cursor = conn.cursor()
+        cursor.execute(f"""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_schema = 'public' 
+                AND table_name = '{table_name}'
+            );
+        """)
+        table_exists = cursor.fetchone()[0]
+        cursor.close()
+        conn.close()
+        
+        if not table_exists:
+            logging.error(f"Table {table_name} does not exist in the database!")
+            raise ValueError(f"Tabela {table_name} não existe no banco de dados.")
+        
+        # Create vector store
+        vector_store = PGVectorStore.from_params(
+            host=host,
+            port=port,
+            database=dbname,
+            user=user,
+            password=password,
+            table_name=table_name,
+            embed_dim=1536,
+            hybrid_search=True
+        )
+        
+        logging.info(f"Created vector store for table: {table_name}")
+        
+        # Create index from vector store
+        index = VectorStoreIndex.from_vector_store(
+            vector_store,
+            embed_model=embed_model
+        )
+        
+        logging.info(f"Created index from vector store")
+        
+        # Create query engine with specific parameters
+        query_engine = index.as_query_engine(
+            llm=llm,
+            similarity_top_k=similarity_top_k,
+            streaming=True,
+            response_mode="compact"
+        )
+        
+        logging.info(f"Successfully created query engine")
+        return query_engine
+    except Exception as e:
+        logging.error(f"Error creating query engine: {str(e)}")
+        logging.exception("Detailed error information:")
+        raise
