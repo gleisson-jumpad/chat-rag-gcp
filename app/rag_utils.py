@@ -1,9 +1,15 @@
 import os
-from llama_index.core import SimpleDirectoryReader, VectorStoreIndex, ServiceContext
+from llama_index.core import SimpleDirectoryReader, VectorStoreIndex
+from llama_index.core.settings import Settings
 from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.vector_stores.postgres import PGVectorStore
 from llama_index.core.storage.storage_context import StorageContext
 import tempfile
+import logging
+import psycopg2
+from sqlalchemy import create_engine, text
+from urllib.parse import quote_plus
+from db_config import get_pg_connection
 
 # Extensões suportadas por default
 SUPPORTED_EXTENSIONS = [".pdf", ".txt", ".docx", ".pptx", ".md", ".csv"]
@@ -28,48 +34,43 @@ def process_uploaded_file(file, session_id):
         # Load documents using LlamaIndex
         docs = SimpleDirectoryReader(input_files=[filepath]).load_data()
         
-        # Connect to pgvector database
-        db_public_ip = os.getenv("DB_PUBLIC_IP")
-        
-        # Determine connection method
-        if os.path.exists("/cloudsql"):
-            # In Cloud Run with private connectivity
-            instance_connection_name = os.getenv("INSTANCE_CONNECTION_NAME")
-            if instance_connection_name:
-                host = f"/cloudsql/{instance_connection_name}"
-                port = None
-            else:
-                # Fallback to public IP if instance connection name is not set
-                host = db_public_ip or "localhost"
-                port = int(os.getenv("PG_PORT", 5432))
-        else:
-            # Local development or using public IP
-            host = db_public_ip or "localhost"
-            port = int(os.getenv("PG_PORT", 5432))
+        # Get database connection parameters from environment variables
+        host = os.getenv("DB_PUBLIC_IP", "34.150.190.157")
+        port = int(os.getenv("PG_PORT", 5432))
+        dbname = os.getenv("PG_DB", "postgres")
+        user = os.getenv("PG_USER", "llamaindex") 
+        password = os.getenv("PG_PASSWORD", "password123")
         
         # Create table name with session ID to prevent collisions
         table_name = f"vectors_{session_id.replace('-', '_')}"
         
-        # Set up PGVectorStore
-        vector_store = PGVectorStore.from_params(
-            database=os.getenv("PG_DB", "postgres"),
-            user=os.getenv("PG_USER", "postgres"),
-            password=os.getenv("PG_PASSWORD"),
-            host=host,
-            port=port,
-            table_name=table_name
-        )
+        try:
+            # Log connection details (without password)
+            logging.info(f"Creating PGVectorStore with params: host={host}, port={port}, db={dbname}, user={user}")
+            
+            # Simplest approach: Create PGVectorStore with basic parameters
+            vector_store = PGVectorStore.from_params(
+                host=host,
+                port=port,
+                database=dbname,
+                user=user,
+                password=password,
+                table_name=table_name,
+                embed_dim=1536,  # OpenAI dimension
+                use_jsonb=False  # Use simpler storage format
+            )
+            
+            logging.info(f"Successfully created PGVectorStore for table {table_name}")
+            
+        except Exception as e:
+            logging.error(f"ERROR setting up database: {str(e)}")
+            raise
         
         # Set the OpenAI API key as environment variable
         os.environ["OPENAI_API_KEY"] = openai_api_key
         
-        # Initialize with minimal configuration
-        embed_model = OpenAIEmbedding()
-        
-        # Create service context with the embedding model
-        service_context = ServiceContext.from_defaults(
-            embed_model=embed_model
-        )
+        # Create embedding model with explicit model name
+        embed_model = OpenAIEmbedding(model="text-embedding-ada-002")
         
         # Create storage context with the vector store
         storage_context = StorageContext.from_defaults(vector_store=vector_store)
@@ -78,7 +79,30 @@ def process_uploaded_file(file, session_id):
         index = VectorStoreIndex.from_documents(
             docs, 
             storage_context=storage_context,
-            service_context=service_context
+            embed_model=embed_model
         )
         
         return index
+
+def get_existing_tables():
+    """Return a list of existing vector tables in the database"""
+    try:
+        conn = get_pg_connection()
+        cursor = conn.cursor()
+        
+        # Query to find vector tables with both naming patterns
+        cursor.execute("""
+            SELECT table_name FROM information_schema.tables 
+            WHERE table_schema = 'public' AND 
+            (table_name LIKE 'vectors_%' OR table_name LIKE 'data_vectors_%')
+        """)
+        
+        vector_tables = [table[0] for table in cursor.fetchall()]
+        cursor.close()
+        conn.close()
+        
+        logging.info(f"Found {len(vector_tables)} vector tables: {vector_tables}")
+        return vector_tables
+    except Exception as e:
+        logging.error(f"Error retrieving existing tables: {str(e)}")
+        return []

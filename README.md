@@ -89,3 +89,34 @@ If you encounter issues:
 2. Verify PostgreSQL connectivity and pgvector extension installation
 3. Ensure your OpenAI API key is valid and has sufficient quota
 4. For Cloud Run deployments, check IAM permissions for Secret Manager and Cloud SQL access 
+
+### RAG System Not Finding Documents
+
+If your RAG system reports "Nenhum documento disponível para RAG":
+
+1. **Check database connection**: 
+   - Navigate to the "Teste de Conexão com PostgreSQL" page to verify database connectivity
+   - Use the Diagnóstico Avançado page to check both connection and environment variables
+
+2. **Environment variables**: 
+   - Ensure all database environment variables are correctly set:
+     ```bash
+     export DB_PUBLIC_IP=your_postgresql_ip
+     export PG_PORT=5432
+     export PG_DB=postgres
+     export PG_USER=llamaindex
+     export PG_PASSWORD=your_password
+     ```
+
+3. **Reset session state**: 
+   - On the Diagnóstico Avançado page, click "Limpar e Recarregar Sessão" to reset the application state
+   - This will force the app to re-check for documents in the database
+
+4. **Database tables**:
+   - Check if vector tables exist in your PostgreSQL database
+   - Tables should be named with the pattern `vectors_*`
+   - You can verify this in the Diagnóstico Avançado page
+
+5. **Create a test document**:
+   - Upload a simple text or PDF file to verify the processing pipeline
+   - Monitor the console logs for any errors during document processing 
