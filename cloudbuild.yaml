@@ -1,24 +1,32 @@
 # cloudbuild.yaml - Configurado para chat-rag-v2 (Opção 2: IP Público)
-# Build executado na região 'global'. Deploy feito em 'us-east4'.
+# Build executado na região 'global' com cache de camadas Docker habilitado.
+# Deploy feito em 'us-east4'.
 
 steps:
-  # Passo 1: Build da Imagem Docker
+  # Passo 1: Build da Imagem Docker (com Cache Habilitado)
   - name: 'gcr.io/cloud-builders/docker'
+    id: Build
     args:
       - 'build'
-      - '-t'
-      # Destino da imagem no repo em us-east4
+      # --- Habilita Cache ---
+      # Usa a imagem 'latest' anterior como cache.
+      # O primeiro build será lento, os subsequentes serão mais rápidos
+      # se as dependências não mudarem.
+      - '--cache-from'
       - 'us-east4-docker.pkg.dev/$PROJECT_ID/chat-rag-repo-v2/image:latest'
-      - '.'
-    id: Build
+      # --------------------
+      - '-t'
+      # Tag da imagem a ser construída (destino no repo us-east4)
+      - 'us-east4-docker.pkg.dev/$PROJECT_ID/chat-rag-repo-v2/image:latest'
+      - '.' # Diretório de contexto (onde o Dockerfile está)
 
   # Passo 2: Push da Imagem para o Artifact Registry (em us-east4)
   - name: 'gcr.io/cloud-builders/docker'
+    id: Push
     args:
       - 'push'
       # Destino do push no repo em us-east4
       - 'us-east4-docker.pkg.dev/$PROJECT_ID/chat-rag-repo-v2/image:latest'
-    id: Push
     waitFor: ['Build'] # Espera o passo 'Build' terminar
 
   # --- PASSO 3: Deploy no Cloud Run (Configurado para OPÇÃO 2 - IP PÚBLICO) ---
@@ -38,23 +46,19 @@ steps:
       - '--region'
       - 'us-east4'
       # Variáveis de Ambiente para IP Público
-      - '--set-env-vars=PG_DB=postgres,PG_USER=postgres,PG_PASSWORD=SUA_SENHA_DEFINIDA_AQUI,DB_PUBLIC_IP=34.150.190.157'
+      - '--set-env-vars=PG_DB=postgres,PG_USER=postgres,PG_PASSWORD=AMGQk@50l9Eu,DB_PUBLIC_IP=34.150.190.157'
         # !!! ALERTA DE SEGURANÇA: Substitua SUA_SENHA_DEFINIDA_AQUI pela senha real!
         # !!! RECOMENDADO: Use Secret Manager para a senha em produção!
       - '--allow-unauthenticated'
-      # REMOVIDO: --vpc-egress=all (Não pode ser usado sem --vpc-connector)
-      # A saída padrão sem configuração VPC é permitir acesso à internet.
+      # Sem flags de VPC/Egress, permitindo saída padrão para internet
       # Conta de Serviço
       - '--service-account=${_SERVICE_ACCOUNT_EMAIL}'
-      # REMOVIDO: --add-cloudsql-instances
-      # REMOVIDO: --vpc-connector
     waitFor: ['Push'] # Espera o passo 'Push' terminar
 
 # Configurações Globais do Build
 options:
   logging: CLOUD_LOGGING_ONLY
-  # O build executa na pool global por padrão quando 'region' é omitido aqui
-  # e o trigger não força uma região específica para o build.
+  # O build executa na pool global por padrão (sem 'region:' aqui)
 
 # Imagens resultantes do build (opcional)
 images:
