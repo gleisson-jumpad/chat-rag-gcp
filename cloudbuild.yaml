@@ -4,7 +4,6 @@ steps:
   - name: 'gcr.io/cloud-builders/docker'
     args: ['push', 'us-east4-docker.pkg.dev/chat-rag-v1/chat-rag/image:latest']
 options:
-  logging: GCS_ONLY
-logsBucket: "gs://chat-rag"
+  logging: CLOUD_LOGGING_ONLY
 images:
   - 'us-east4-docker.pkg.dev/chat-rag-v1/chat-rag/image:latest'
