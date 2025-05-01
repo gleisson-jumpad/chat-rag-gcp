@@ -417,6 +417,28 @@ def get_existing_tables():
         logger.error(f"Error retrieving existing tables: {str(e)}", exc_info=True)
         return []
 
+def table_exists(table_name):
+    """Check if a table exists in the database"""
+    try:
+        logger.info(f"Checking if table {table_name} exists")
+        
+        with get_pg_cursor() as cursor:
+            cursor.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_schema = 'public'
+                    AND table_name = %s
+                );
+            """, (table_name,))
+            
+            exists = cursor.fetchone()[0]
+        
+        logger.info(f"Table {table_name} exists: {exists}")
+        return exists
+    except Exception as e:
+        logger.error(f"Error checking if table exists: {str(e)}", exc_info=True)
+        return False
+
 def create_query_engine(model_id, table_name, similarity_top_k=5):
     """Create a query engine for a specific table
     

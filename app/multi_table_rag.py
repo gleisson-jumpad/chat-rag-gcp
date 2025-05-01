@@ -78,6 +78,19 @@ class MultiTableRAGTool:
         self.openai_model = openai_model
         self.llm = OpenAI(model=openai_model)
         
+        # Configure OpenAI embedding model
+        openai_api_key = os.getenv("OPENAI_API_KEY")
+        if not openai_api_key:
+            self.logger.error("OPENAI_API_KEY not set in environment")
+            raise ValueError("OpenAI API key is required")
+        
+        # Set up LlamaIndex settings
+        Settings.embed_model = OpenAIEmbedding(
+            model="text-embedding-ada-002", 
+            embed_batch_size=100
+        )
+        self.logger.info("Configured OpenAI embedding model")
+        
         # Initialize connection pool for better performance
         self._init_connection_pool()
         
@@ -266,60 +279,82 @@ class MultiTableRAGTool:
         return table_configs
     
     def _initialize(self):
-        """Initialize vector stores and indexes for each table"""
+        """Initialize vector stores and indexes for all tables"""
         self.logger.info("Initializing vector stores and indexes for all tables")
         
-        # Set up OpenAI API key
-        openai_api_key = os.getenv("OPENAI_API_KEY")
-        if not openai_api_key:
-            self.logger.error("OPENAI_API_KEY not set in environment")
-            raise ValueError("OpenAI API key is required")
-            
-        # Configure LlamaIndex settings with OpenAI embedding model
-        Settings.embed_model = OpenAIEmbedding(model="text-embedding-ada-002", embed_batch_size=100)
+        # Only load basic configuration info initially, not the actual indexes
+        # Indexes will be loaded on-demand when needed
+        self.logger.info("Using lazy loading - indexes will be initialized when needed")
         
-        # Initialize each table
+        # Instead of loading all indexes, just set up the configuration
         for table_config in self.table_configs:
             table_name = table_config["name"]
+            self.logger.info(f"Recording configuration for table: {table_name}")
+            
+            # Only log table stats, don't create query engines yet
+            doc_count = table_config.get("doc_count", 0)
+            chunk_count = table_config.get("chunk_count", 0)
+            has_hnsw = table_config.get("has_hnsw", False)
+            
+            self.logger.info(f"Table {table_name}: {doc_count} docs, {chunk_count} chunks, HNSW: {has_hnsw}")
+    
+    def _initialize_table(self, table_name):
+        """Lazy-load a specific table's vector store and query engine when needed"""
+        if table_name in self.query_engines:
+            # Already initialized
+            return True
+            
+        try:
             self.logger.info(f"Initializing table: {table_name}")
             
-            try:
-                # Create vector store with hybrid search capability
-                vector_store = PGVectorStore.from_params(
-                    database=self.db_config["database"],
-                    host=self.db_config["host"],
-                    password=self.db_config["password"],
-                    port=self.db_config["port"],
-                    user=self.db_config["user"],
-                    table_name=table_name,
-                    embed_dim=table_config.get("embed_dim", 1536),  # OpenAI embedding dimension
-                    hybrid_search=table_config.get("hybrid_search", True),  # Enable hybrid search
-                    text_search_config=table_config.get("language", "english")
-                )
+            # Find the table config
+            table_config = next((config for config in self.table_configs if config["name"] == table_name), None)
+            if not table_config:
+                self.logger.error(f"Table {table_name} not found in table_configs")
+                return False
                 
-                self.vector_stores[table_name] = vector_store
-                
-                # Create storage context
-                storage_context = StorageContext.from_defaults(vector_store=vector_store)
-                
-                # Create index from vector store
-                self.logger.info(f"Loading index from vector store: {table_name}")
-                index = VectorStoreIndex.from_vector_store(
-                    vector_store,
-                    storage_context=storage_context,
-                    embed_model=Settings.embed_model
-                )
-                
-                self.indexes[table_name] = index
-                
-                # Create query engine
-                self.query_engines[table_name] = self._create_query_engine(vector_store, self.llm)
-                
-                self.logger.info(f"Successfully initialized table: {table_name}")
-                
-            except Exception as e:
-                self.logger.error(f"Error initializing table {table_name}: {str(e)}")
-                # Continue with other tables instead of failing completely
+            # Create vector store for the table
+            self.logger.info(f"Loading index from vector store: {table_name}")
+            embed_dim = table_config.get("embed_dim", 1536)
+            
+            # Get a connection creator function
+            def get_conn():
+                return self._get_connection()
+            
+            # Create the vector store
+            vector_store = PGVectorStore.from_params(
+                database=self.db_config["database"],
+                host=self.db_config["host"],
+                password=self.db_config["password"],
+                port=self.db_config["port"],
+                user=self.db_config["user"],
+                table_name=table_name,
+                embed_dim=embed_dim,
+                connection_creator=get_conn,
+                hybrid_search=table_config.get("hybrid_search", True),
+                text_search_config=table_config.get("language", "english")
+            )
+            
+            # Store the vector store
+            self.vector_stores[table_name] = vector_store
+            
+            # Create storage context and vector store index
+            self.logger.info(f"Creating query engine from vector store")
+            storage_context = StorageContext.from_defaults(vector_store=vector_store)
+            index = VectorStoreIndex.from_vector_store(vector_store, storage_context=storage_context)
+            self.logger.info(f"Using existing index for table {table_name}")
+            self.indexes[table_name] = index
+            
+            # Create and store enhanced query engine
+            query_engine = self._create_query_engine(vector_store, self.llm)
+            self.logger.info(f"Enhanced query engine created successfully")
+            self.query_engines[table_name] = query_engine
+            
+            self.logger.info(f"Successfully initialized table: {table_name}")
+            return True
+        except Exception as e:
+            self.logger.error(f"Error initializing table {table_name}: {str(e)}")
+            return False
     
     def __del__(self):
         """Cleanup connection pool on object destruction"""
@@ -1444,6 +1479,103 @@ class MultiTableRAGTool:
         except Exception as e:
             self.logger.error(f"Error creating query engine: {str(e)}")
             raise
+
+    def get_file_listing(self):
+        """
+        Efficiently get a listing of all files in the database without loading indexes.
+        This is much faster than initializing all query engines.
+        
+        Returns:
+            dict: A mapping of table_name to list of files in that table
+        """
+        file_listing = {}
+        conn = None
+        
+        try:
+            conn = self._get_connection()
+            if not conn:
+                self.logger.error("Could not establish database connection for file listing")
+                return {}
+                
+            cursor = conn.cursor()
+            
+            # Use the table_configs we already fetched during initialization
+            for table_config in self.table_configs:
+                table_name = table_config["name"]
+                files = table_config.get("files", [])
+                
+                # Only include tables that have files
+                if files:
+                    file_listing[table_name] = files
+            
+            return file_listing
+        except Exception as e:
+            self.logger.error(f"Error getting file listing: {str(e)}")
+            return {}
+        finally:
+            if conn:
+                self._return_connection(conn)
+    
+    def query_single_table(self, table_name, query_text, filters=None):
+        """Query a single table with the given query text"""
+        try:
+            # Ensure the table is initialized before querying
+            if table_name not in self.query_engines:
+                if not self._initialize_table(table_name):
+                    return {
+                        "answer": f"Error initializing table {table_name}",
+                        "source_nodes": [],
+                        "table": table_name
+                    }
+            
+            # Rest of the function remains unchanged
+            self.logger.info(f"Querying table '{table_name}' with: '{query_text}' (filters: {filters})")
+            
+            # Get or create query engine
+            if table_name not in self.query_engines:
+                self.logger.info(f"Creating new query engine for {table_name}")
+                if table_name in self.vector_stores and table_name in self.indexes:
+                    self.query_engines[table_name] = self._create_query_engine(
+                        self.vector_stores[table_name], 
+                        self.llm
+                    )
+            
+            # Execute query with the engine
+            self.logger.info(f"Executing query against table {table_name}")
+            
+            # Add filter if provided
+            if filters:
+                self.logger.info(f"Applying filters: {filters}")
+                response = self.query_engines[table_name].query(query_text, filter=filters)
+            else:
+                response = self.query_engines[table_name].query(query_text)
+            
+            # Format the response with source nodes
+            result = {
+                "answer": str(response),
+                "sources": []
+            }
+            
+            # Include source nodes if available - following pg_rag_simple.py's pattern
+            if hasattr(response, 'source_nodes'):
+                for node in response.source_nodes:
+                    source_info = {
+                        "text": node.node.get_content()[:150] + "..." if len(node.node.get_content()) > 150 else node.node.get_content(),
+                        "file_name": node.node.metadata.get("file_name", "unknown"),
+                        "relevance_score": float(node.score) if hasattr(node, "score") else None
+                    }
+                    result["sources"].append(source_info)
+                    
+                # Debug print what we found
+                self.logger.info(f"Found {len(result['sources'])} source nodes")
+                for idx, source in enumerate(result["sources"]):
+                    self.logger.info(f"Source {idx+1}: {source['file_name']} - Score: {source['relevance_score']}")
+            
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"Error querying table {table_name}: {str(e)}")
+            return {"error": str(e), "message": f"Error querying table {table_name}"}
 
 def create_multi_rag_tool_spec(available_files=None):
     """Create a specification for the multi-table RAG tool"""

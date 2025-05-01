@@ -11,7 +11,7 @@ from llama_index.core import VectorStoreIndex, StorageContext
 from llama_index.core.indices.query.query_transform.base import StepDecomposeQueryTransform
 from llama_index.core.query_engine import RouterQueryEngine
 
-st.set_page_config(page_title="Chat RAG", layout="wide")
+st.set_page_config(page_title="Jumpad RAG", layout="wide")
 
 # Custom CSS to widen the sidebar and improve file display
 st.markdown("""
@@ -51,7 +51,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("💬 Chat RAG – Jumpad")
+st.title("💬 Jumpad RAG")
 
 # Initialize session state for storing uploaded files info
 if 'session_id' not in st.session_state:
@@ -81,9 +81,79 @@ elif menu == "🛠️ Ferramentas":
 else:
     current_page = menu
 
+# Add a global status message area at the top of the page
+def show_status_message():
+    """Display status messages in the top right corner"""
+    if 'global_status' in st.session_state and 'global_status_type' in st.session_state:
+        # Create a container that positions the message at the top right
+        container = st.container()
+        with container:
+            # Use columns to position the message at the right
+            cols = st.columns([3, 1])
+            with cols[1]:
+                # Check if we're in a processing state
+                is_processing = st.session_state.global_status_type == 'processing'
+                
+                if is_processing:
+                    # Show a spinner icon with message for processing state
+                    st.markdown(f"""
+                    <div style="display: flex; align-items: center; background-color: #004080; padding: 10px; border-radius: 5px; border: 1px solid #0066cc; max-width: 100%;">
+                        <div class="stSpinner" style="margin-right: 10px;">
+                            <svg width="24" height="24" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                <style>
+                                    .spinner_9y7u {{
+                                        transform-origin: center;
+                                        animation: spinner_5meh .75s infinite linear;
+                                    }}
+                                    @keyframes spinner_5meh {{
+                                        100% {{ transform: rotate(360deg) }}
+                                    }}
+                                </style>
+                                <path class="spinner_9y7u" d="M12,1A11,11,0,1,0,23,12,11,11,0,0,0,12,1Zm0,19a8,8,0,1,1,8-8A8,8,0,0,1,12,20Z" opacity=".25" fill="white"/>
+                                <path class="spinner_9y7u" d="M12,4a8,8,0,0,1,7.89,6.7A1.53,1.53,0,0,0,21.38,12h0a1.5,1.5,0,0,0,1.48-1.75,11,11,0,0,0-21.72,0A1.5,1.5,0,0,0,2.62,12h0a1.53,1.53,0,0,0,1.49-1.3A8,8,0,0,1,12,4Z" fill="white"/>
+                            </svg>
+                        </div>
+                        <span style="color: white; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{st.session_state.global_status}</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+                elif st.session_state.global_status_type == 'success':
+                    st.success(st.session_state.global_status)
+                elif st.session_state.global_status_type == 'error':
+                    st.error(st.session_state.global_status)
+                elif st.session_state.global_status_type == 'info':
+                    st.info(st.session_state.global_status)
+                elif st.session_state.global_status_type == 'warning':
+                    st.warning(st.session_state.global_status)
+            
+            # Auto-clear status after 5 seconds if requested
+            if 'global_status_auto_clear' in st.session_state and st.session_state.global_status_auto_clear:
+                # Add a simple CSS-based approach to auto-dismiss
+                st.markdown("""
+                <style>
+                    .auto-dismiss {
+                        animation: fadeOut 5s forwards;
+                    }
+                    @keyframes fadeOut {
+                        0% {opacity: 1;}
+                        80% {opacity: 1;}
+                        100% {opacity: 0; display: none;}
+                    }
+                </style>
+                <script>
+                    setTimeout(function() {
+                        const alerts = window.parent.document.querySelectorAll('.stAlert');
+                        alerts.forEach(function(alert) {
+                            alert.classList.add('auto-dismiss');
+                        });
+                    }, 500);
+                </script>
+                """, unsafe_allow_html=True)
+                st.session_state.global_status_auto_clear = False
+
 # Páginas do menu
 if current_page == "🔍 Consulta com RAG":
-    st.subheader("💬 ChatRAG Multi-Tabela")
+    # Display status messages at the top
+    show_status_message()
     
     # Initialize chat history if it doesn't exist
     if 'messages' not in st.session_state:
@@ -188,78 +258,86 @@ if current_page == "🔍 Consulta com RAG":
                 elif st.session_state.status_type == 'info':
                     st.markdown('ℹ️', unsafe_allow_html=True)
         
-        # Create a key in session state for the form if it doesn't exist
-        if 'form_key' not in st.session_state:
-            st.session_state.form_key = 0
+        # Simplified direct file uploader without form
+        uploaded_files = st.file_uploader(
+            "Arquivo", 
+            type=[ext[1:] for ext in SUPPORTED_EXTENSIONS], 
+            accept_multiple_files=True,
+            key=f"direct_file_uploader"
+        )
+        
+        # Display file list if any are selected
+        if uploaded_files and len(uploaded_files) > 0:
+            st.write(f"**{len(uploaded_files)} arquivo(s) selecionado(s)**")
+            for f in uploaded_files:
+                st.write(f"- {f.name}")
+        
+        # Simple direct upload button
+        if st.button("Processar e Vetorizar", 
+                    disabled=not uploaded_files or len(uploaded_files) == 0,
+                    key="process_direct_btn"):
+            if uploaded_files and len(uploaded_files) > 0:
+                # Show processing status with spinner in top-right
+                st.session_state.global_status = f"Iniciando processamento de {len(uploaded_files)} arquivo(s)..."
+                st.session_state.global_status_type = 'processing'
+                st.rerun()  # Refresh to show the status first
+        
+        # Handle file processing if triggered
+        if ('global_status' in st.session_state and 
+            st.session_state.global_status_type == 'processing' and 
+            'Iniciando processamento' in st.session_state.get('global_status', '')):
             
-        # Create a container for status messages
-        status_container = st.container()
-        
-        # Use a unique key for the form to force it to reset
-        with st.form(f"upload_form_{st.session_state.form_key}"):
-            uploaded_files = st.file_uploader("Arquivo", type=[ext[1:] for ext in SUPPORTED_EXTENSIONS], accept_multiple_files=True, key=f"file_uploader_{st.session_state.form_key}")
-            upload_submitted = st.form_submit_button("Processar e Adicionar")
-        
-        if upload_submitted and uploaded_files:
-            # Process files and update status
-            with status_container:
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-                
-                total_files = len(uploaded_files)
-                processed_count = 0
-                error_count = 0
-                
-                for i, uploaded_file in enumerate(uploaded_files):
-                    # Update progress
-                    progress = (i / total_files)
-                    progress_bar.progress(progress)
-                    status_text.info(f"Processando {i+1}/{total_files}: {uploaded_file.name}")
+            # Process files directly without showing local status
+            processed_count = 0
+            error_count = 0
+            
+            for i, uploaded_file in enumerate(uploaded_files):
+                try:
+                    # Update only the global status
+                    st.session_state.global_status = f"Processando {i+1}/{len(uploaded_files)}: {uploaded_file.name}"
+                    st.session_state.global_status_type = 'processing'
                     
-                    try:
-                        # Use the utility function from rag_utils.py
-                        index = process_uploaded_file(uploaded_file, st.session_state.session_id)
-                        
-                        # Store file info in session state
-                        if uploaded_file.name not in [f['name'] for f in st.session_state.uploaded_files]:
-                            st.session_state.uploaded_files.append({
-                                'name': uploaded_file.name,
-                                'size': uploaded_file.size,
-                                'table': f"vectors_{st.session_state.session_id}"
-                            })
-                        
-                        processed_count += 1
-                        
-                    except Exception as e:
-                        error_count += 1
-                        st.error(f"❌ Erro ao processar {uploaded_file.name}: {str(e)}")
-                
-                # Complete the progress bar
-                progress_bar.progress(1.0)
-                
-                # Show final status message
-                if processed_count > 0:
-                    status_text.success(f"✅ {processed_count} arquivo(s) processado(s) com sucesso!")
-                if error_count > 0:
-                    status_text.error(f"❌ {error_count} arquivo(s) com erro")
+                    # Use the utility function from rag_utils.py
+                    index = process_uploaded_file(uploaded_file, st.session_state.session_id)
+                    
+                    # Store file info in session state
+                    if uploaded_file.name not in [f['name'] for f in st.session_state.uploaded_files]:
+                        st.session_state.uploaded_files.append({
+                            'name': uploaded_file.name,
+                            'size': uploaded_file.size,
+                            'table': f"vectors_{st.session_state.session_id}"
+                        })
+                    
+                    processed_count += 1
+                except Exception as e:
+                    error_count += 1
+                    # Errors will be shown in final status
+            
+            # Set global status for results
+            if processed_count > 0:
+                # Set global status for success
+                st.session_state.global_status = f"✅ {processed_count} arquivo(s) processado(s) com sucesso!"
+                st.session_state.global_status_type = 'success'
+                st.session_state.global_status_auto_clear = True
+            elif error_count > 0:
+                st.session_state.global_status = f"❌ Erro no processamento dos arquivos."
+                st.session_state.global_status_type = 'error'
             
             # Re-initialize the RAG tool with the new documents
             from multi_table_rag import MultiTableRAGTool
             st.session_state.multi_rag_tool = MultiTableRAGTool()
             
-            # Increment the form key to reset the form in the next render
-            st.session_state.form_key += 1
-            
-            # Force a rerun to reset the uploader
+            # Force a rerun to refresh UI state
             st.rerun()
         
         st.markdown("---")
         
         # Simplified display of available documents with multi-select delete
         all_files = {}  # Change to dict to track file:table mapping
-        for table_config in st.session_state.multi_rag_tool.table_configs:
-            table_name = table_config["name"]
-            files = table_config.get("files", [])
+        
+        # Use the lightweight file listing method instead of accessing table_configs
+        file_listing = st.session_state.multi_rag_tool.get_file_listing()
+        for table_name, files in file_listing.items():
             for file in files:
                 all_files[file] = table_name
         
@@ -274,121 +352,188 @@ if current_page == "🔍 Consulta com RAG":
             # Create a scrollable container for document list
             doc_list_container = st.container()
             with doc_list_container:
-                # Add multi-delete controls
+                # Create columns for title and delete button
                 col1, col2 = st.columns([3, 1])
                 with col1:
                     st.markdown(f"Total: {len(all_files)} documento(s)")
+                    
+                    # Always show the selected count
+                    selected_count = len(st.session_state.selected_files_to_delete)
+                    if selected_count > 0:
+                        st.markdown(f"**{selected_count} selecionado(s)**")
+                
                 with col2:
-                    # Only show delete button if files are selected
-                    if len(st.session_state.selected_files_to_delete) > 0:
-                        # Just show the trash icon without text
-                        if st.button("🗑️", key="multi_delete", help=f"Excluir {len(st.session_state.selected_files_to_delete)} arquivos selecionados"):
-                            st.session_state.trigger_multi_delete = True
-                            st.rerun()
+                    # Show delete button if files are selected
+                    if selected_count > 0:
+                        # Create a delete button that directly calls the delete function
+                        if st.button("🗑️", key="direct_delete_btn"):
+                            # Start deletion process directly
+                            st.session_state.global_status = f"Iniciando exclusão de {selected_count} arquivo(s)..."
+                            st.session_state.global_status_type = 'processing'
+                            st.rerun()  # Refresh to show the status first
                 
-                # Create the scrollable list
-                st.markdown('<div style="max-height: 300px; overflow-y: auto;">', unsafe_allow_html=True)
-                
-                # Create checkboxes for each file
-                for i, (file_name, table_name) in enumerate(sorted(all_files.items())):
-                    # Calculate a short display name if needed
-                    if len(file_name) > 25:
-                        display_name = file_name[:22] + "..."
-                    else:
-                        display_name = file_name
-                    
-                    # Use a container with checkbox for selection
-                    cols = st.columns([0.5, 4.5])
-                    with cols[0]:
-                        is_selected = st.checkbox("", key=f"select_{file_name}", 
-                                                 value=file_name in st.session_state.selected_files_to_delete)
-                        if is_selected and file_name not in st.session_state.selected_files_to_delete:
-                            st.session_state.selected_files_to_delete.append(file_name)
-                        elif not is_selected and file_name in st.session_state.selected_files_to_delete:
-                            st.session_state.selected_files_to_delete.remove(file_name)
-                    
-                    with cols[1]:
-                        # Display file name with tooltip
-                        st.markdown(f'<div class="doc-item" title="{file_name}">📄 {display_name}</div>',
-                                   unsafe_allow_html=True)
-                
-                st.markdown('</div>', unsafe_allow_html=True)
-            
-            # Process multi-file deletion if triggered
-            if 'trigger_multi_delete' in st.session_state and st.session_state.trigger_multi_delete:
-                # Clear the trigger
-                del st.session_state.trigger_multi_delete
-                
-                if len(st.session_state.selected_files_to_delete) > 0:
-                    # Create a progress dialog
-                    delete_progress = st.progress(0)
-                    delete_status = st.empty()
-                    delete_status.info(f"Excluindo {len(st.session_state.selected_files_to_delete)} arquivo(s)...")
-                    
-                    deleted_count = 0
-                    error_count = 0
-                    total_to_delete = len(st.session_state.selected_files_to_delete)
-                    
+                # Handle deletion process if triggered
+                if ('global_status' in st.session_state and 
+                    st.session_state.global_status_type == 'processing' and 
+                    'Iniciando exclusão' in st.session_state.get('global_status', '')):
                     try:
-                        # Connect to the database
+                        # Connect to database directly
                         from db_config import get_pg_connection
                         conn = get_pg_connection()
                         cursor = conn.cursor()
                         
-                        # Delete each selected file
+                        deleted_count = 0
+                        success_files = []
+                        
+                        # Process each file without showing individual UI elements
                         for i, file_name in enumerate(st.session_state.selected_files_to_delete):
-                            # Update progress
-                            progress = (i / total_to_delete)
-                            delete_progress.progress(progress)
-                            delete_status.info(f"Excluindo {i+1}/{total_to_delete}: {file_name}")
+                            # Update only the global status for progress
+                            st.session_state.global_status = f"Excluindo {i+1}/{len(st.session_state.selected_files_to_delete)}: {file_name}"
+                            st.session_state.global_status_type = 'processing'
                             
+                            # Get table name
                             table_name = all_files.get(file_name)
                             if table_name:
                                 try:
-                                    # Delete document chunks from the table
-                                    cursor.execute(f"""
-                                        DELETE FROM {table_name}
-                                        WHERE metadata_->>'file_name' = %s
-                                    """, (file_name,))
+                                    # First check if the table exists
+                                    cursor.execute("""
+                                        SELECT EXISTS (
+                                            SELECT FROM information_schema.tables 
+                                            WHERE table_schema = 'public'
+                                            AND table_name = %s
+                                        );
+                                    """, (table_name,))
                                     
-                                    deleted_count += cursor.rowcount
+                                    table_exists = cursor.fetchone()[0]
+                                    
+                                    if table_exists:
+                                        # Delete from database with quoted table name
+                                        cursor.execute(f"""
+                                            DELETE FROM "{table_name}"
+                                            WHERE metadata_->>'file_name' = %s
+                                        """, (file_name,))
+                                        
+                                        # Track results
+                                        rows = cursor.rowcount
+                                        deleted_count += rows
+                                        success_files.append((file_name, rows))
+                                        
+                                        # Also drop the entire table if it's a data_vectors table
+                                        # and there are no more documents in it
+                                        if table_name.startswith("data_vectors_"):
+                                            # Check if table is now empty
+                                            cursor.execute(f"""
+                                                SELECT COUNT(*) FROM "{table_name}"
+                                            """)
+                                            remaining_rows = cursor.fetchone()[0]
+                                            
+                                            if remaining_rows == 0:
+                                                try:
+                                                    # Import and use the drop_vector_table function
+                                                    from db_config import drop_vector_table
+                                                    
+                                                    # Update status before table drop
+                                                    st.session_state.global_status = f"Excluindo {i+1}/{len(st.session_state.selected_files_to_delete)}: {file_name} (removendo tabela)"
+                                                    
+                                                    # Close current connection to avoid lock conflicts
+                                                    cursor.close()
+                                                    conn.close()
+                                                    
+                                                    # Drop table with separate connection
+                                                    drop_success = drop_vector_table(table_name)
+                                                    
+                                                    # Reconnect for the rest of the operations
+                                                    conn = get_pg_connection()
+                                                    cursor = conn.cursor()
+                                                    
+                                                    if drop_success:
+                                                        st.session_state.global_status = f"Excluindo {i+1}/{len(st.session_state.selected_files_to_delete)}: {file_name} (tabela removida)"
+                                                except Exception as drop_error:
+                                                    # Log the error but continue with file deletion
+                                                    print(f"Error dropping table {table_name}: {drop_error}")
+                                                    
+                                                    # Reconnect if needed
+                                                    if conn.closed:
+                                                        conn = get_pg_connection()
+                                                        cursor = conn.cursor()
+                                    else:
+                                        # Still track the file for removal, just no rows deleted
+                                        success_files.append((file_name, 0))
                                     
                                     # Remove from session state
                                     st.session_state.uploaded_files = [
                                         f for f in st.session_state.uploaded_files if f['name'] != file_name
                                     ]
                                 except Exception as e:
-                                    error_count += 1
-                                    st.error(f"Erro ao excluir {file_name}: {str(e)}")
+                                    # Just continue, we'll show overall status at the end
+                                    pass
                         
                         # Commit changes
                         conn.commit()
                         cursor.close()
                         conn.close()
                         
-                        # Complete the progress bar
-                        delete_progress.progress(1.0)
+                        # Show results only in global status
+                        if success_files:
+                            # Set global status for success message
+                            st.session_state.global_status = f"✅ {len(success_files)} arquivo(s) excluído(s) com sucesso! ({deleted_count} chunks)"
+                            st.session_state.global_status_type = 'success'
+                            st.session_state.global_status_auto_clear = True
                         
-                        # Update status
-                        if deleted_count > 0:
-                            delete_status.success(f"✅ {deleted_count} chunks excluídos com sucesso!")
-                        if error_count > 0:
-                            delete_status.error(f"❌ {error_count} arquivo(s) com erro na exclusão")
-                        
-                        # Clear selection
+                        # Clear selected files
                         st.session_state.selected_files_to_delete = []
                         
-                        # Re-initialize the RAG tool
+                        # Reinitialize RAG tool
                         from multi_table_rag import MultiTableRAGTool
                         st.session_state.multi_rag_tool = MultiTableRAGTool()
                         
-                        # Wait a moment so user can see the success message
-                        time.sleep(1)
+                        # Force a rerun to refresh the UI
                         st.rerun()
-                    
                     except Exception as e:
-                        delete_status.error(f"Erro: {str(e)}")
-                        st.stop()
+                        # Set global status for error display
+                        st.session_state.global_status = f"❌ Erro na operação de exclusão: {str(e)}"
+                        st.session_state.global_status_type = 'error'
+                        st.rerun()
+                
+                # File list with checkboxes
+                st.markdown('<div style="max-height: 300px; overflow-y: auto;">', unsafe_allow_html=True)
+                
+                # Create checkboxes for each file
+                for i, (file_name, table_name) in enumerate(sorted(all_files.items())):
+                    # Create a row for each file
+                    cols = st.columns([0.5, 4.5])
+                    
+                    with cols[0]:
+                        # Check if already selected
+                        is_selected = file_name in st.session_state.selected_files_to_delete
+                        
+                        # Create a checkbox with a unique key
+                        new_state = st.checkbox("", value=is_selected, key=f"select_file_{i}_{file_name[:10]}")
+                        
+                        # Update selection if changed
+                        if new_state != is_selected:
+                            if new_state:
+                                # Add to selected files
+                                if file_name not in st.session_state.selected_files_to_delete:
+                                    st.session_state.selected_files_to_delete.append(file_name)
+                                    st.rerun()
+                            else:
+                                # Remove from selected files
+                                if file_name in st.session_state.selected_files_to_delete:
+                                    st.session_state.selected_files_to_delete.remove(file_name)
+                                    st.rerun()
+                    
+                    with cols[1]:
+                        # Display file name with tooltip
+                        if len(file_name) > 25:
+                            display_name = file_name[:22] + "..."
+                        else:
+                            display_name = file_name
+                            
+                        st.markdown(f'<div class="doc-item" title="{file_name}">📄 {display_name}</div>',
+                                   unsafe_allow_html=True)
+                
+                st.markdown('</div>', unsafe_allow_html=True)
         else:
             st.info("Nenhum documento encontrado")
             st.markdown("Adicione documentos usando o formulário acima")
@@ -467,6 +612,10 @@ elif current_page == "🏠 Início":
 
 elif current_page == "🔌 Teste de Conexão com PostgreSQL":
     st.subheader("🔌 Teste de Conexão com o Banco")
+    
+    # Display status messages at the top
+    show_status_message()
+    
     try:
         from db_config import get_pg_connection
         conn = get_pg_connection()
@@ -483,6 +632,9 @@ elif current_page == "🔌 Teste de Conexão com PostgreSQL":
 
 elif current_page == "📥 Upload e Vetorização de Arquivos":
     st.subheader("📥 Upload e Vetorização de Arquivos")
+    
+    # Display status messages at the top
+    show_status_message()
     
     # Check if we need to import existing documents
     if len(st.session_state.uploaded_files) == 0:
@@ -572,65 +724,84 @@ elif current_page == "📥 Upload e Vetorização de Arquivos":
         key=f"standalone_uploader_{st.session_state.standalone_form_key}"
     )
     
-    if uploaded_files:
-        # Show files details
+    # Show files details if any are selected
+    if uploaded_files and len(uploaded_files) > 0:
         st.write(f"**{len(uploaded_files)} arquivo(s) selecionado(s):**")
         for uploaded_file in uploaded_files:
             st.write(f"- {uploaded_file.name} ({uploaded_file.size} bytes)")
+    
+    # Use a button with clear visual indication
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        process_clicked = st.button(
+            "Processar e Vetorizar", 
+            key="process_standalone_btn",
+            disabled=not (uploaded_files and len(uploaded_files) > 0),
+            help="Processa os arquivos selecionados e cria embeddings vetoriais"
+        )
+    with col2:
+        # Show status indicator
+        if 'processing_files' in st.session_state and st.session_state.processing_files:
+            st.markdown("⏳", unsafe_allow_html=True)
+    
+    # Only process if button was clicked and files were selected
+    if process_clicked and uploaded_files and len(uploaded_files) > 0:
+        # Mark that we're processing
+        st.session_state.processing_files = True
         
-        # Process button
-        if st.button("Processar e Vetorizar"):
-            # Process files with status messages
-            with status_area:
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-                
-                total_files = len(uploaded_files)
-                processed_count = 0
-                error_count = 0
-                
-                for i, uploaded_file in enumerate(uploaded_files):
-                    # Update progress
-                    progress = (i / total_files)
-                    progress_bar.progress(progress)
-                    status_text.info(f"Processando {i+1}/{total_files}: {uploaded_file.name}")
-                    
-                    try:
-                        # Use the utility function from rag_utils.py
-                        index = process_uploaded_file(uploaded_file, st.session_state.session_id)
-                        
-                        # Store file info in session state
-                        if uploaded_file.name not in [f['name'] for f in st.session_state.uploaded_files]:
-                            st.session_state.uploaded_files.append({
-                                'name': uploaded_file.name,
-                                'size': uploaded_file.size,
-                                'table': f"vectors_{st.session_state.session_id}"
-                            })
-                        
-                        processed_count += 1
-                    except Exception as e:
-                        error_count += 1
-                        status_text.error(f"❌ Erro: {uploaded_file.name}: {str(e)}")
-                
-                # Complete the progress bar
-                progress_bar.progress(1.0)
-                
-                # Show final status message
-                if processed_count > 0:
-                    status_text.success(f"✅ {processed_count} arquivo(s) processado(s) com sucesso!")
-                if error_count > 0:
-                    status_text.warning(f"⚠️ {error_count} arquivo(s) com erro")
-            
-            # Re-initialize the RAG tool with the new documents
-            from multi_table_rag import MultiTableRAGTool
-            if 'multi_rag_tool' in st.session_state:
-                st.session_state.multi_rag_tool = MultiTableRAGTool()
-            
-            # Increment the form key to reset the form in the next render
-            st.session_state.standalone_form_key += 1
-            
-            # Force a rerun to reset the uploader
+        # Show processing status with spinner in top-right
+        st.session_state.global_status = f"Processando {len(uploaded_files)} arquivo(s)..."
+        st.session_state.global_status_type = 'processing'
+        st.rerun()
+        
+        # Simple direct processing without status updates
+        processed_count = 0
+        error_count = 0
+        total_files = len(uploaded_files)
+        
+        for i, uploaded_file in enumerate(uploaded_files):
+            # Update processing status with progress
+            st.session_state.global_status = f"Processando arquivo {i+1}/{total_files}: {uploaded_file.name}"
+            st.session_state.global_status_type = 'processing'
             st.rerun()
+            
+            try:
+                # Use the utility function from rag_utils.py
+                index = process_uploaded_file(uploaded_file, st.session_state.session_id)
+                
+                # Store file info in session state
+                if uploaded_file.name not in [f['name'] for f in st.session_state.uploaded_files]:
+                    st.session_state.uploaded_files.append({
+                        'name': uploaded_file.name,
+                        'size': uploaded_file.size,
+                        'table': f"vectors_{st.session_state.session_id}"
+                    })
+                
+                processed_count += 1
+            except Exception as e:
+                error_count += 1
+                # Set global status for error
+                st.session_state.global_status = f"❌ Erro ao processar {uploaded_file.name}: {str(e)}"
+                st.session_state.global_status_type = 'error'
+        
+        # Set status message in top-right
+        if processed_count > 0:
+            # Set global status for success
+            st.session_state.global_status = f"✅ {processed_count} arquivo(s) processado(s) com sucesso!"
+            st.session_state.global_status_type = 'success'
+            st.session_state.global_status_auto_clear = True
+        
+        # Reset processing flags
+        if 'processing_files' in st.session_state:
+            st.session_state.processing_files = False
+        
+        # Re-initialize the RAG tool with the new documents
+        from multi_table_rag import MultiTableRAGTool
+        st.session_state.multi_rag_tool = MultiTableRAGTool()
+        
+        # Increment the form key to reset the form in the next render
+        st.session_state.standalone_form_key += 1
+        st.rerun()
     
     # Display uploaded files in a scrollable container with better formatting
     if st.session_state.uploaded_files:
@@ -652,6 +823,9 @@ elif current_page == "📥 Upload e Vetorização de Arquivos":
 
 elif current_page == "🧪 Diagnóstico Avançado":
     st.subheader("🧪 Diagnóstico do Sistema RAG")
+    
+    # Display status messages at the top
+    show_status_message()
     
     # Check OpenAI API key
     api_key_tab, db_tab, vector_tab = st.tabs(["API OpenAI", "Banco de Dados", "Tabelas Vetoriais"])

@@ -468,6 +468,73 @@ def verify_vector_table(table_name: str) -> Dict[str, Any]:
             result["error"] = str(e)
             return result
 
+def drop_vector_table(table_name: str) -> bool:
+    """
+    Safely drop a vector table from the database.
+    
+    Args:
+        table_name: Name of the table to drop
+        
+    Returns:
+        bool: True if the table was dropped successfully, False otherwise
+    """
+    logger.info(f"Attempting to drop vector table: {table_name}")
+    
+    conn = None
+    try:
+        # Use direct connection instead of context manager for better error handling
+        conn = get_pg_connection()
+        cursor = conn.cursor()
+        
+        # First check if the table exists
+        cursor.execute("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_schema = 'public'
+                AND table_name = %s
+            );
+        """, (table_name,))
+        
+        table_exists = cursor.fetchone()[0]
+        
+        if not table_exists:
+            logger.warning(f"Table {table_name} does not exist")
+            return False
+            
+        # Set a statement timeout to prevent hanging operations (10 seconds)
+        cursor.execute("SET statement_timeout = 10000;")
+        
+        # Drop the table with timeout protection
+        logger.info(f"Executing DROP TABLE command for {table_name}")
+        cursor.execute(f'DROP TABLE IF EXISTS "{table_name}";')
+        
+        # Commit the changes
+        conn.commit()
+        logger.info(f"Successfully dropped table {table_name}")
+        
+        # Close cursor and connection
+        cursor.close()
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error dropping table {table_name}: {str(e)}")
+        # Attempt to rollback if there was an error
+        if conn:
+            try:
+                conn.rollback()
+                logger.info(f"Rolled back transaction after error")
+            except:
+                pass
+        return False
+    finally:
+        # Ensure connection is returned to pool or closed
+        if conn:
+            try:
+                return_pg_connection(conn)
+                logger.info(f"Returned connection to pool after dropping table")
+            except Exception as e:
+                logger.error(f"Error returning connection to pool: {str(e)}")
+
 # Initialize the connection pool when the module is imported
 try:
     initialize_connection_pool()
