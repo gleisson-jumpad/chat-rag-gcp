@@ -46,7 +46,7 @@ steps:
       - '--region'
       - 'us-east4'
       # Variáveis de Ambiente para IP Público
-      - '--set-env-vars=PG_DB=postgres,PG_USER=postgres,PG_PASSWORD=AMGQk@50l9Eu,DB_PUBLIC_IP=34.150.190.157,PG_PORT=5432'
+      - '--set-env-vars=PG_DB=postgres,PG_USER=llamaindex,PG_PASSWORD=password123,DB_PUBLIC_IP=34.150.190.157,PG_PORT=5432'
       # Referência ao Secret Manager para a API key do OpenAI
       - '--set-secrets=OPENAI_API_KEY=openai-api-key:latest'
       - '--allow-unauthenticated'
