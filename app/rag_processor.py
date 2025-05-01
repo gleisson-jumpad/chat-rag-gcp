@@ -89,6 +89,38 @@ def process_query_with_llm(user_message: str, rag_tool: Any, model: str = "gpt-4
         logger.error("OPENAI_API_KEY environment variable not set")
         return "ERROR: OpenAI API key not set in environment variables"
     
+    # Check if this is a simple conversational query
+    conversational_patterns = ["olá", "oi", "bom dia", "boa tarde", "boa noite", "hello", "hi", 
+                              "hey", "good morning", "good afternoon", "good evening", "como vai", 
+                              "tudo bem", "how are you", "obrigado", "thank you", "thanks"]
+    
+    is_conversational = any(pattern in user_message.lower() for pattern in conversational_patterns)
+    
+    if is_conversational:
+        # For conversational queries, respond directly without RAG
+        logger.info("Conversational query detected, responding directly")
+        try:
+            # Simple system prompt for conversational interactions
+            system_prompt = """
+            Você é um assistente de IA amigável. Para mensagens conversacionais simples como saudações,
+            responda de forma natural e breve.
+            """
+            
+            # Get response directly from OpenAI
+            response = openai.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message}
+                ]
+            )
+            
+            return response.choices[0].message.content
+        except Exception as e:
+            logger.error(f"Error generating conversational response: {str(e)}")
+            return f"Ocorreu um erro ao processar sua consulta: {str(e)}"
+    
+    # For non-conversational queries, proceed with standard RAG
     try:
         # First get the RAG results
         logger.info("Getting RAG results")
