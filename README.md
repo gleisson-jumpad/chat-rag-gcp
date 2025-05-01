@@ -20,6 +20,350 @@ The application uses LlamaIndex and OpenAI embeddings to build a robust RAG syst
 - `Tests/test_vector_search.py`: Performance benchmark for vector search functionality
 - `db_config.py`: Database configuration utilities
 
+## Understanding LlamaIndex with pgvector Integration
+
+LlamaIndex serves as the backbone of this RAG implementation, handling both document processing and retrieval operations with pgvector. Here's a detailed explanation of how it works for the two main processes:
+
+### 1. Document Upload and Vector Storage Pipeline
+
+When a document is uploaded to our system, LlamaIndex processes it through the following steps:
+
+1. **Document Loading** (`rag_utils.py: process_uploaded_file()`):
+   - Documents are loaded using LlamaIndex's document loaders based on file type
+   - Support for PDF, DOCX, TXT, CSV, MD, and other formats
+   - Text extraction with proper metadata preservation
+
+2. **Text Chunking** (`rag_utils.py: process_uploaded_file()`):
+   - Documents are split into smaller chunks using LlamaIndex text splitters
+   - Default chunk size is configured for optimal retrieval
+   - Chunk overlap ensures context preservation across chunks
+
+3. **Embedding Generation** (`rag_utils.py -> multi_table_rag.py`):
+   - Each text chunk is converted to an embedding vector using OpenAI's embedding model
+   - Default model: text-embedding-ada-002 (dimensions: 1536)
+   - Batched processing for efficiency
+
+4. **PostgreSQL Storage** (`postgres_rag_tool.py`):
+   - Embeddings are stored in PostgreSQL tables with pgvector extension
+   - Each document collection gets its own table with schema:
+     ```
+     CREATE TABLE {table_name} (
+       id UUID PRIMARY KEY,
+       embedding VECTOR(1536),
+       document TEXT,
+       metadata_ JSONB
+     )
+     ```
+   - HNSW indices are created for approximate nearest neighbor search
+   - File metadata is preserved in the JSONB column
+
+**Code Flow for Document Processing:**
+
+```
+app/main.py (upload interface)
+    ↓
+app/rag_utils.py:process_uploaded_file()
+    ↓
+llama_index.core:VectorStoreIndex creation
+    ↓
+app/multi_table_rag.py:create_vector_index()
+    ↓
+app/postgres_rag_tool.py:store_embeddings()
+    ↓
+PostgreSQL with pgvector
+```
+
+### 2. Query and Retrieval Pipeline
+
+When a user submits a query, the system processes it through these steps:
+
+1. **Query Embedding** (`multi_table_rag.py: query()`):
+   - User query is converted to an embedding vector
+   - Same embedding model is used as for document processing
+
+2. **Multi-Table Vector Search** (`multi_table_rag.py: search_across_tables()`):
+   - Query embedding is compared against embeddings in all vector tables
+   - Similarity search uses cosine similarity with pgvector
+   - Top-k most similar documents from each table are retrieved
+
+3. **Hybrid Search Enhancement** (`postgres_rag_tool.py: hybrid_search()`):
+   - Vector similarity search is combined with keyword matching
+   - BM25 or other keyword ranking algorithms boost relevance
+   - Results are re-ranked based on combined score
+
+4. **Context Synthesis** (`rag_processor.py: process_query_with_llm()`):
+   - Retrieved document chunks are assembled into context
+   - Context is formatted with proper attribution and metadata
+
+5. **Response Generation** (`rag_processor.py: process_query_with_llm()`):
+   - LLM (OpenAI) generates a response based on retrieved context
+   - System prompts ensure proper source attribution
+   - Fallback mechanisms handle cases with insufficient context
+
+**Code Flow for Query Processing:**
+
+```
+app/main.py (query interface)
+    ↓
+app/multi_table_rag.py:query()
+    ↓
+app/multi_table_rag.py:search_across_tables()
+    ↓
+app/postgres_rag_tool.py:vector_search() / hybrid_search()
+    ↓
+app/rag_processor.py:process_query_with_llm()
+    ↓
+Response generation with OpenAI
+```
+
+### Key Files and Their Functions
+
+- `app/main.py`: Web interface for document upload and query processing
+- `app/rag_utils.py`: Utilities for document processing and data formatting
+- `app/multi_table_rag.py`: Core implementation for multi-table RAG
+- `app/postgres_rag_tool.py`: Integration with PostgreSQL and pgvector
+- `app/rag_processor.py`: LLM query processing and response generation
+- `app/db_config.py`: Database connection and configuration utilities
+- `app/pgvector_admin.py`: Utilities for managing pgvector tables and indices
+
+### Advanced Features
+
+1. **HNSW Indices for Performance**
+   - Hierarchical Navigable Small World indices accelerate vector search
+   - Configured with appropriate M and ef_construction parameters
+   - Managed through `pgvector_admin.py`
+
+2. **Multi-Table Search Strategy**
+   - Documents are organized into separate tables by collection or type
+   - Parallel search across tables with rank aggregation
+   - Table-specific relevance scoring and normalization
+
+3. **Hybrid Search Capabilities**
+   - Vector similarity combined with keyword matching
+   - Configurable weights between semantic and lexical search
+   - Fall-back mechanisms when semantic search yields low confidence
+
+## Indexing Strategy
+
+This RAG implementation primarily uses **Vector Store Index** as its core indexing strategy, specifically with PostgreSQL and pgvector extension as the backend. Here's a breakdown of our approach and how it compares to alternative indexing options:
+
+### Vector Store Index with PGVector
+
+Our system leverages LlamaIndex's `VectorStoreIndex` with `PGVectorStore` implementation to create and query vector embeddings. This combination offers several advantages:
+
+- **Scalability**: PostgreSQL can handle millions of document chunks efficiently
+- **Persistence**: Embeddings remain available after system restarts
+- **SQL Integration**: Combines vector search with traditional SQL capabilities
+- **Hybrid Search**: Enables both semantic (vector) and lexical (keyword) search
+- **ACID Compliance**: Ensures data consistency during concurrent operations
+
+Core implementation components:
+```python
+# Vector store creation
+vector_store = PGVectorStore.from_params(
+    database=db_name,
+    host=db_host,
+    password=db_password,
+    port=db_port,
+    user=db_user,
+    table_name=table_name,
+    embed_dim=1536
+)
+
+# Index creation from vector store
+index = VectorStoreIndex.from_vector_store(
+    vector_store,
+    service_context=service_context
+)
+```
+
+### Comparison with Alternative Indexing Strategies
+
+While our system primarily uses Vector Store Index, it's useful to understand how it compares to other indexing options:
+
+| Index Type | Description | Use Cases | Comparison to Our Approach |
+|------------|-------------|-----------|----------------------------|
+| **Vector Store Index** | Embeds documents/nodes into vectors for similarity search | General retrieval, semantic search | **Our primary approach** - Optimized for similarity-based retrieval |
+| **Summary Index** | Creates summaries of documents | Question answering over long texts | We use vector search with dynamic summarization instead of pre-summarization |
+| **List Index** | Simple sequential storage | Small document sets, precise matching | Too simplistic for our multi-document, semantic search needs |
+| **Tree Index** | Hierarchical document structure | Complex, nested documents | Our multi-table approach achieves similar benefits with better scalability |
+| **Keyword Table Index** | Retrieval based on keywords | Exact matching requirements | Incorporated as part of our hybrid search capability |
+| **SQL Index** | Integration with SQL databases | Structured data retrieval | We combine this with vector search through PostgreSQL integration |
+| **KG Index** | Knowledge graph representation | Relationship-heavy domains | We implement limited graph-like features through entity recognition |
+
+### Why Vector Store Index with pgvector?
+
+We chose this approach for several key reasons:
+
+1. **Performance at Scale**: HNSW indices in pgvector enable sub-second queries over millions of vectors
+2. **Flexibility**: PostgreSQL allows custom extensions to the vector search capabilities
+3. **Maturity**: Both PostgreSQL and pgvector are production-ready technologies
+4. **Hybrid Search**: Enables seamless integration of semantic and keyword search
+5. **Multi-table Design**: Supports organization of documents into logical collections
+
+### Implementation Details
+
+Our Vector Store Index implementation includes several optimizations:
+
+- **Parallel Index Creation**: Documents are processed and indexed in parallel
+- **Batch Embedding**: Vectors are generated in batches to optimize API usage
+- **HNSW Indexing**: Automatic creation of HNSW indices for performance
+- **Field-specific Indexing**: Metadata fields receive specialized indexing
+- **Hybrid Retrieval**: Vector search is augmented with keyword matching
+
+This indexing strategy powers both document ingestion and retrieval in our RAG pipeline, providing the foundation for accurate and efficient information retrieval.
+
+## Key Technical Concepts
+
+### Vector Search Fundamentals
+
+#### 1. HNSW Indices (Hierarchical Navigable Small Worlds)
+
+HNSW is an advanced algorithm for approximate nearest neighbor (ANN) search in high-dimensional vector spaces, critical for the performance of our RAG system.
+
+- **How it works**: HNSW creates a multi-layered graph structure where:
+  - Upper layers form a coarse-grained representation of the vector space
+  - Lower layers provide increasingly finer-grained representations
+  - Search starts at the top layer and descends through the hierarchy
+
+- **Key parameters**:
+  - `M`: Controls the maximum number of connections per node (default: 16)
+  - `ef_construction`: Controls index build quality vs. speed tradeoff (default: 64)
+  - `ef_search`: Controls search quality vs. speed tradeoff (runtime parameter)
+
+- **Benefits in our implementation**:
+  - Logarithmic search complexity vs. linear in brute-force approaches
+  - 100-1000x speed improvement for large document collections
+  - Minimal accuracy loss compared to exact search methods
+
+- **Implementation in pgvector**:
+  ```sql
+  CREATE INDEX idx_hnsw_embedding ON vector_table
+  USING hnsw(embedding vector_cosine_ops)
+  WITH (m = 16, ef_construction = 64);
+  ```
+
+#### 2. Top-k Retrieval
+
+Top-k retrieval is the process of finding the k most similar documents to a query vector, forming the foundation of our vector search.
+
+- **How it works**:
+  - Query embedding is compared against all document embeddings
+  - Similarity measures (cosine, dot product, Euclidean) quantify relevance
+  - Documents are ranked by similarity score
+  - Only the k highest-scoring documents are returned
+
+- **Implementations in our system**:
+  - **Basic Top-k**: Direct retrieval of k nearest vectors
+    ```sql
+    SELECT document, metadata_, 1 - (embedding <=> query_embedding) as score
+    FROM vector_table
+    ORDER BY embedding <=> query_embedding
+    LIMIT k;
+    ```
+  
+  - **Table-aware Top-k**: Adjusting k based on table characteristics
+    - Larger k for tables with more diverse content
+    - Smaller k for specialized, domain-specific tables
+    - Dynamic k adjustment based on query complexity
+
+- **Optimizations**:
+  - Parallel retrieval across multiple tables
+  - Score normalization for cross-table comparison
+  - Diversity-aware selection to reduce redundancy
+
+#### 3. BM25 and Keyword Ranking Algorithms
+
+BM25 (Best Matching 25) is a probabilistic ranking algorithm used alongside vector search in our hybrid search implementation.
+
+- **How BM25 works**:
+  - Scores documents based on term frequency and inverse document frequency
+  - Accounts for document length normalization
+  - Handles term saturation (diminishing returns for repeated terms)
+
+- **BM25 formula**:
+  ```
+  score(D,Q) = ∑(IDF(qi) · (f(qi,D) · (k1+1)) / (f(qi,D) + k1 · (1-b+b · |D|/avgdl)))
+  ```
+  Where:
+  - f(qi,D): Term frequency of term qi in document D
+  - |D|: Length of document D
+  - avgdl: Average document length
+  - k1, b: Tuning parameters
+
+- **Implementation in our system**:
+  - PostgreSQL's full-text search capabilities with custom BM25 weighting
+  - Term-based inverted indices for efficient keyword lookups
+  - Custom scoring functions combining vector and keyword relevance
+
+- **Other lexical ranking algorithms used**:
+  - **TF-IDF**: Term Frequency-Inverse Document Frequency
+  - **Language models**: Probabilistic models of term occurrence
+  - **N-gram matching**: For handling misspellings and partial matches
+
+## Enhanced Advanced Features
+
+### 1. Multi-Modal RAG Capabilities
+
+Our system extends beyond text to handle multiple modalities:
+
+- **Image Understanding**:
+  - Image embedding generation using CLIP or similar models
+  - Cross-modal search between text queries and image content
+  - Image metadata extraction and indexing
+
+- **Table and Structured Data Processing**:
+  - Special handling for CSV and spreadsheet data
+  - Table content vectorization with structure preservation
+  - Query-specific table column selection
+
+### 2. Adaptive Retrieval Strategies
+
+The system employs contextual adaptation techniques to optimize retrieval:
+
+- **Query Classification**:
+  - Automatic detection of query type (factoid, analytical, exploratory)
+  - Selection of retrieval strategy based on query characteristics
+  - Different similarity thresholds for different query types
+
+- **Context-Aware Retrieval**:
+  - Conversation history influences retrieval parameters
+  - Progressive refinement of search based on user feedback
+  - Query expansion using detected entities and concepts
+
+### 3. Knowledge Graph Enhancement
+
+Vector search is augmented with knowledge graph capabilities:
+
+- **Entity Recognition and Linking**:
+  - Identification of key entities in documents and queries
+  - Connection of entities across document boundaries
+  - Entity-aware query reformulation
+
+- **Relationship Extraction**:
+  - Detection of semantic relationships between entities
+  - Graph-based relevance scoring as a factor in ranking
+  - Connection of information across disparate documents
+
+### 4. Performance Optimization Techniques
+
+Our implementation includes several performance enhancements:
+
+- **Query Routing**:
+  - Intelligent routing of queries to specific tables based on content
+  - Avoidance of unnecessary search in irrelevant collections
+  - Metadata-based pre-filtering before vector search
+
+- **Caching Mechanisms**:
+  - LRU cache for frequent queries and their results
+  - Embedding cache to avoid recomputing query embeddings
+  - Document chunk cache for frequently retrieved passages
+
+- **Batch Processing**:
+  - Concurrent processing of multiple search requests
+  - Optimized batch embedding generation
+  - Parallel table scanning with work distribution
+
 ## Testing with test_rag.py
 
 The `Tests/test_rag.py` script is a critical diagnostic tool for verifying your RAG implementation. It performs the following functions:
