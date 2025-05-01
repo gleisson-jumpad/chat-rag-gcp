@@ -561,6 +561,10 @@ class MultiTableRAGTool:
         try:
             self.logger.info(f"Processing query: {query_text}")
             
+            # Check if the query is about financial information
+            financial_keywords = ["valor", "preço", "custo", "pagamento", "mensalidade", "reais", "R$", "preços", "valores"]
+            is_financial_query = any(keyword in query_text.lower() for keyword in financial_keywords)
+            
             # Update the LLM model for this query
             llm = OpenAI(model=model, temperature=0.1)
             
@@ -580,6 +584,97 @@ class MultiTableRAGTool:
                     
                     # Get the index for this table
                     index = self.indexes[table_name]
+                    
+                    # If this is a financial query, try direct SQL first
+                    if is_financial_query:
+                        self.logger.info(f"Financial query detected, trying direct SQL approach first")
+                        conn = get_pg_connection()
+                        cursor = conn.cursor()
+                        
+                        # Check if we need to look for contract signatories as well
+                        contract_signatories_keywords = ["assinou", "assinado", "assinaram", "assinaturas", "signatário", "signatários"]
+                        needs_signatories = any(keyword in query_text.lower() for keyword in contract_signatories_keywords)
+                        
+                        # Search conditions based on query needs
+                        search_conditions = """
+                            text ILIKE '%valor%' OR 
+                            text ILIKE '%R$%' OR 
+                            text ILIKE '%reais%' OR
+                            text ILIKE '%pagamento%' OR
+                            text ILIKE '%mensalidade%'
+                        """
+                        
+                        # Add signatory search conditions if needed
+                        if needs_signatories:
+                            self.logger.info(f"Also searching for contract signatories")
+                            signatory_conditions = """
+                            OR text ILIKE '%assinou%' OR
+                            text ILIKE '%assinado%' OR
+                            text ILIKE '%assina%' OR
+                            text ILIKE '%representada%' OR
+                            text ILIKE '%CPF%' OR
+                            text ILIKE '%CNPJ%' OR
+                            text ILIKE '%testemunha%'
+                            """
+                            search_conditions += signatory_conditions
+                        
+                        # Search for contract information
+                        cursor.execute(f"""
+                            SELECT text, metadata_->>'file_name' as filename, metadata_->>'page_label' as page 
+                            FROM {table_name}
+                            WHERE {search_conditions}
+                            LIMIT 7
+                        """)
+                        
+                        results = cursor.fetchall()
+                        if results:
+                            self.logger.info(f"Found {len(results)} chunks with contract information in {table_name}")
+                            
+                            # Build context from contract information
+                            context = "\n\n".join([row[0] for row in results])
+                            
+                            # Create prompt for LLM
+                            prompt = f"""
+                            Answer the following question based on this contract information:
+                            
+                            Question: {query_text}
+                            
+                            Context:
+                            {context}
+                            
+                            Answer the question using only information from the context. Use the exact values mentioned in the document.
+                            If the information is not clearly stated in the context, indicate that it might not be available.
+                            
+                            For contract values, specify the exact amounts. For signing parties, mention names, roles, and companies.
+                            For signing dates, provide the precise date if available.
+                            """
+                            
+                            # Get answer from LLM
+                            response = llm.complete(prompt)
+                            answer_text = response.text if hasattr(response, 'text') else str(response)
+                            
+                            # Create synthetic sources
+                            sources = []
+                            for text, filename, page in results:
+                                sources.append({
+                                    "text": text[:150] + "..." if len(text) > 150 else text,
+                                    "metadata": {"file_name": filename, "page_label": page},
+                                    "score": 0.95,  # High score since this is direct match
+                                    "table": table_name
+                                })
+                            
+                            all_sources.extend(sources)
+                            best_response = answer_text
+                            best_table_name = table_name
+                            
+                            cursor.close()
+                            conn.close()
+                            
+                            # Skip vector search for this table since we already have good results
+                            continue
+                        
+                        cursor.close()
+                        conn.close()
                     
                     # Configure a query engine with higher similarity_top_k for better recall
                     query_engine = index.as_query_engine(

@@ -283,10 +283,10 @@ elif menu == "🔍 Consulta com RAG":
                     - Seja direto e conciso em suas respostas
                     """
                     
-                    # Process the message with RAG integration
-                    from postgres_rag_tool import process_message_with_selective_rag
+                    # Process the message with our improved RAG processor
+                    from rag_processor import process_query_with_llm
                     
-                    response = process_message_with_selective_rag(
+                    response = process_query_with_llm(
                         prompt, 
                         st.session_state.multi_rag_tool, 
                         model=model_id
