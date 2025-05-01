@@ -328,6 +328,10 @@ def process_message_with_selective_rag(user_message, rag_tool, model="gpt-4o"):
     """Process a user message with selective RAG (only use RAG when needed)"""
     import openai
     import logging
+    import re
+    import json
+    from llama_index.core.vector_stores import MetadataFilters, ExactMatchFilter
+    from openai import OpenAI as DirectOpenAI
     
     # Configure logging
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -345,6 +349,200 @@ def process_message_with_selective_rag(user_message, rag_tool, model="gpt-4o"):
     files_info = rag_tool.get_files_in_database()
     available_docs = files_info["all_files"]
     
+    # Check if this is a document summary request
+    # Examples: "resumir o arquivo X.pdf", "summarize document Y.pdf", etc.
+    doc_summary_pattern = re.compile(r'(resum[ae]|sum[aá]rio|sumarize|summarize).*?(documento|document|arquivo|file|pdf)[:\s]*([^?\s]+\.[a-zA-Z0-9]{2,4})', re.IGNORECASE)
+    match = doc_summary_pattern.search(user_message)
+    
+    if match and available_docs:
+        requested_doc = match.group(3).strip()
+        logger.info(f"Document summary request detected for: {requested_doc}")
+        
+        # Try to find the exact document or closest match
+        exact_match = None
+        for doc in available_docs:
+            if doc.lower() == requested_doc.lower():
+                exact_match = doc
+                break
+        
+        if not exact_match:
+            # Try partial matching
+            for doc in available_docs:
+                if requested_doc.lower() in doc.lower() or doc.lower() in requested_doc.lower():
+                    exact_match = doc
+                    logger.info(f"Found partial match: {doc} for requested document: {requested_doc}")
+                    break
+        
+        if exact_match:
+            logger.info(f"Summarizing document: {exact_match}")
+            
+            # VECTOR SEARCH APPROACH: Use LlamaIndex's vector search with metadata filtering
+            try:
+                # Find the table containing this document
+                doc_table = None
+                for table, files in files_info["files_by_table"].items():
+                    if exact_match in files:
+                        doc_table = table
+                        break
+                
+                if doc_table:
+                    logger.info(f"Found document in table: {doc_table}")
+                    
+                    # Prepare a list of summary queries to retrieve comprehensive information
+                    summary_queries = [
+                        f"What are the main topics and key points in the document '{exact_match}'?",
+                        f"What is the overall structure and content of '{exact_match}'?",
+                        f"Provide a detailed summary of '{exact_match}' covering all important aspects."
+                    ]
+                    
+                    # Get the index for this table
+                    index = None
+                    if hasattr(rag_tool, 'indexes') and doc_table in rag_tool.indexes:
+                        index = rag_tool.indexes[doc_table]
+                        logger.info(f"Using existing index for table {doc_table}")
+                    
+                    if index:
+                        # Create metadata filter for the document
+                        filters = MetadataFilters(filters=[ExactMatchFilter(key="file_name", value=exact_match)])
+                        
+                        # Create LLM
+                        llm = OpenAI(model=model)
+                        
+                        # Create a custom query engine with higher top_k and metadata filters
+                        query_engine = index.as_query_engine(
+                            llm=llm,
+                            similarity_top_k=15,  # Higher k value for better document coverage
+                            response_mode="tree_summarize",  # Use tree_summarize for better summaries of longer texts
+                            filters=filters  # Apply the file_name filter
+                        )
+                        
+                        # Run multiple queries to get comprehensive coverage
+                        all_responses = []
+                        for query in summary_queries:
+                            logger.info(f"Running vector query: {query}")
+                            response = query_engine.query(query)
+                            if response and hasattr(response, 'response'):
+                                all_responses.append(response.response)
+                        
+                        # Create a synthesized summary from all responses
+                        if all_responses:
+                            combined_response = "\n\n".join(all_responses)
+                            
+                            # Final synthesis step
+                            client = DirectOpenAI(api_key=openai_api_key)
+                            synthesis_prompt = f"""
+                            Create a comprehensive, well-structured summary of the document '{exact_match}' 
+                            based on the following extracted information:
+                            
+                            {combined_response}
+                            
+                            Your summary should:
+                            1. Cover all major topics and key points
+                            2. Be well-organized with sections and subpoints where appropriate
+                            3. Present information in a logical flow
+                            4. Include any important details or conclusions from the document
+                            """
+                            
+                            logger.info("Generating final synthesized summary")
+                            final_response = client.chat.completions.create(
+                                model=model,
+                                messages=[
+                                    {"role": "system", "content": "You are a helpful assistant that creates clear, comprehensive document summaries."},
+                                    {"role": "user", "content": synthesis_prompt}
+                                ]
+                            )
+                            
+                            summary = final_response.choices[0].message.content
+                            logger.info(f"Successfully generated synthesized summary of length {len(summary)}")
+                            
+                            return summary
+                
+                # If we get here, the vector search approach didn't work
+                logger.warning("Vector search approach didn't produce results, trying direct method")
+                
+                # Try the document method from MultiTableRAGTool if available
+                if hasattr(rag_tool, 'summarize_document'):
+                    logger.info("Using rag_tool.summarize_document method")
+                    result = rag_tool.summarize_document(exact_match)
+                    if result and "answer" in result:
+                        return result["answer"]
+                
+            except Exception as e:
+                logger.error(f"Error during vector search summary: {e}")
+                logger.info("Falling back to direct approach")
+            
+            # DIRECT APPROACH as fallback (only if vector search fails)
+            try:
+                # Extract document content directly from the database
+                from db_config import get_pg_connection
+                conn = get_pg_connection()
+                cursor = conn.cursor()
+                
+                # Get all chunks for this document
+                cursor.execute(f"""
+                    SELECT text, metadata_->>'page_label' as page
+                    FROM {doc_table} 
+                    WHERE metadata_->>'file_name' = %s
+                    ORDER BY id
+                """, (exact_match,))
+                
+                rows = cursor.fetchall()
+                cursor.close()
+                conn.close()
+                
+                if rows:
+                    logger.info(f"Found {len(rows)} chunks for document {exact_match}")
+                    
+                    # Arrange chunks by page number if available
+                    chunks_by_page = {}
+                    for text, page in rows:
+                        if page not in chunks_by_page:
+                            chunks_by_page[page] = []
+                        chunks_by_page[page].append(text)
+                    
+                    # Get sorted pages
+                    sorted_pages = sorted(chunks_by_page.keys(), key=lambda p: int(p) if p and p.isdigit() else 0)
+                    
+                    # Combine all text in order
+                    all_text = []
+                    for page in sorted_pages:
+                        page_text = "\n\n".join(chunks_by_page[page])
+                        all_text.append(page_text)
+                    
+                    document_text = "\n\n".join(all_text)
+                    logger.info(f"Combined document text length: {len(document_text)}")
+                    
+                    # Generate summary with OpenAI directly
+                    client = DirectOpenAI(api_key=openai_api_key)
+                    
+                    summary_prompt = f"""
+                    Based on the following document content from '{exact_match}', please provide a comprehensive summary.
+                    Include main topics, key points, and important information.
+                    Format your response with clear sections and bullet points where appropriate.
+                    
+                    DOCUMENT CONTENT:
+                    {document_text}
+                    """
+                    
+                    logger.info("Generating summary directly with OpenAI")
+                    response = client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": "You are a helpful assistant that provides clear document summaries."},
+                            {"role": "user", "content": summary_prompt}
+                        ]
+                    )
+                    
+                    summary = response.choices[0].message.content
+                    logger.info(f"Successfully generated summary of length {len(summary)}")
+                    
+                    return summary
+                else:
+                    logger.error(f"No chunks found for document {exact_match}")
+            except Exception as e:
+                logger.error(f"Error during direct document summary: {e}")
+    
+    # Standard RAG evaluation for other queries
     # Create a prompt for assessing if RAG is needed
     rag_assessment_messages = [
         {"role": "system", "content": 

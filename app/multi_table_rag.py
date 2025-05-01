@@ -443,63 +443,105 @@ class MultiTableRAGTool:
             }
     
     def query_single_table(self, table_name, query_text, filters=None):
-        """Query a single table"""
+        """Query a specific table"""
+        if filters:
+            self.logger.warning("filters parameter deprecated in query_single_table, use query_single_table_with_filters instead")
+            
         self.logger.info(f"Querying table '{table_name}' with: '{query_text}' (filters: {filters})")
         
-        if table_name not in self.indexes:
-            return {
-                "error": f"Table {table_name} not found or not initialized",
-                "message": f"The requested table {table_name} does not exist or could not be initialized"
-            }
-        
         try:
-            # Get the query engine
-            query_engine = self.query_engines[table_name]
+            if table_name not in self.indexes:
+                self.logger.error(f"Table {table_name} is not in available indices: {list(self.indexes.keys())}")
+                return {"error": f"Table {table_name} not found", "answer": ""}
             
-            # Apply filters if provided
-            if filters:
-                # Create a retriever with filters
-                retriever = self.indexes[table_name].as_retriever(
-                    similarity_top_k=5,
-                    filters=filters
-                )
-                
-                # Create a filtered query engine
-                from llama_index.core.query_engine import RetrieverQueryEngine
-                query_engine = RetrieverQueryEngine.from_args(
-                    retriever=retriever,
-                    llm=self.llm
-                )
-            
-            # Execute the query
+            # Execute query
             self.logger.info(f"Executing query against table {table_name}")
+            query_engine = self.query_engines[table_name]
             response = query_engine.query(query_text)
             
-            # Format response with sources
-            result = {
-                "answer": str(response),
-                "sources": []
-            }
-            
-            # Add source information if available
-            if hasattr(response, "source_nodes"):
-                for node in response.source_nodes:
-                    source_info = {
-                        "text": node.node.get_content()[:250] + "..." if len(node.node.get_content()) > 250 else node.node.get_content(),
-                        "file_name": node.node.metadata.get("file_name", "unknown"),
-                        "page_number": node.node.metadata.get("page_label", "unknown"),
-                        "score": float(node.score) if hasattr(node, "score") else None
-                    }
-                    result["sources"].append(source_info)
+            # Format response
+            result = self._format_response(response)
             
             return result
-        
+            
         except Exception as e:
-            self.logger.error(f"Error querying table {table_name}: {str(e)}")
-            return {
-                "error": str(e),
-                "message": f"Error querying table {table_name}"
-            }
+            error_msg = f"Error querying table {table_name}: {str(e)}"
+            self.logger.error(error_msg)
+            return {"error": error_msg, "answer": ""}
+    
+    def _format_response(self, response):
+        """Format the response from a query engine"""
+        # Format response with sources
+        result = {
+            "answer": str(response),
+            "sources": []
+        }
+        
+        # Add source information if available
+        if hasattr(response, "source_nodes"):
+            for node in response.source_nodes:
+                source_info = {
+                    "text": node.node.get_content()[:250] + "..." if len(node.node.get_content()) > 250 else node.node.get_content(),
+                    "file_name": node.node.metadata.get("file_name", "unknown"),
+                    "page_number": node.node.metadata.get("page_label", "unknown"),
+                    "score": float(node.score) if hasattr(node, "score") else None
+                }
+                result["sources"].append(source_info)
+        
+        return result
+    
+    def query_single_table_with_filters(self, table_name, query_text, filters=None):
+        """
+        Query a specific table with proper LlamaIndex MetadataFilters
+        
+        Args:
+            table_name: Table to query
+            query_text: Query text to run against the table
+            filters: LlamaIndex MetadataFilters object for filtering results
+        """
+        self.logger.info(f"Querying table '{table_name}' with: '{query_text}' and filters: {filters}")
+        
+        try:
+            if table_name not in self.indexes:
+                self.logger.error(f"Table {table_name} is not in available indices: {list(self.indexes.keys())}")
+                return {"error": f"Table {table_name} not found", "answer": ""}
+            
+            # Get the vector store index for this table
+            index = self.indexes[table_name]
+            
+            # Create a custom query engine with the filters
+            if filters:
+                self.logger.info(f"Creating custom query engine with filters: {filters}")
+                
+                # Create LLM
+                llm = OpenAI(model=self.openai_model)
+                
+                # Create a custom query engine with the given filters
+                query_engine = index.as_query_engine(
+                    llm=llm,
+                    similarity_top_k=10,  # Higher k value for better recall
+                    response_mode="compact",
+                    filters=filters,  # Apply the proper MetadataFilters
+                )
+                
+                # Execute query
+                self.logger.info(f"Executing query with filters against table {table_name}")
+                response = query_engine.query(query_text)
+            else:
+                # Use default query engine if no filters
+                self.logger.info(f"Using default query engine for table {table_name}")
+                query_engine = self.query_engines[table_name]
+                response = query_engine.query(query_text)
+            
+            # Format response
+            result = self._format_response(response)
+            
+            return result
+            
+        except Exception as e:
+            error_msg = f"Error querying table {table_name} with filters: {str(e)}"
+            self.logger.error(error_msg)
+            return {"error": error_msg, "answer": ""}
             
     def query_all_tables(self, query_text):
         """Query across all available tables and combine results"""
