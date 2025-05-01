@@ -181,15 +181,47 @@ index = VectorStoreIndex.from_vector_store(
 
 While our system primarily uses Vector Store Index, it's useful to understand how it compares to other indexing options:
 
-| Index Type | Description | Use Cases | Comparison to Our Approach |
-|------------|-------------|-----------|----------------------------|
-| **Vector Store Index** | Embeds documents/nodes into vectors for similarity search | General retrieval, semantic search | **Our primary approach** - Optimized for similarity-based retrieval |
-| **Summary Index** | Creates summaries of documents | Question answering over long texts | We use vector search with dynamic summarization instead of pre-summarization |
-| **List Index** | Simple sequential storage | Small document sets, precise matching | Too simplistic for our multi-document, semantic search needs |
-| **Tree Index** | Hierarchical document structure | Complex, nested documents | Our multi-table approach achieves similar benefits with better scalability |
-| **Keyword Table Index** | Retrieval based on keywords | Exact matching requirements | Incorporated as part of our hybrid search capability |
-| **SQL Index** | Integration with SQL databases | Structured data retrieval | We combine this with vector search through PostgreSQL integration |
-| **KG Index** | Knowledge graph representation | Relationship-heavy domains | We implement limited graph-like features through entity recognition |
+#### **Vector Store Index**
+- **What it is:** Embeds documents/nodes into vectors for similarity search
+- **Use cases:** General retrieval, semantic search, finding similar content
+- **Our implementation:** **Primary approach** in our system - optimized for similarity-based retrieval using PostgreSQL pgvector
+- **Advantages:** Efficient semantic search, scales well, supports hybrid retrieval
+
+#### **Summary Index**
+- **What it is:** Creates summaries of documents for condensed information retrieval
+- **Use cases:** Question answering over long texts, high-level information needs
+- **Our implementation:** We use dynamic summarization at query time rather than pre-summarization
+- **Comparison:** More flexible than static summaries, maintains original context
+
+#### **List Index**
+- **What it is:** Simple sequential storage of document nodes
+- **Use cases:** Small document sets, precise matching, ordered retrieval
+- **Our implementation:** Too simplistic for our needs - we need semantic matching
+- **Comparison:** Our vector approach provides much richer search capabilities
+
+#### **Tree Index**
+- **What it is:** Hierarchical document structure for representing nested information
+- **Use cases:** Complex, nested documents, hierarchical exploration
+- **Our implementation:** We achieve similar hierarchical organization through multi-table design
+- **Comparison:** Our approach offers better cross-document retrieval and scalability
+
+#### **Keyword Table Index**
+- **What it is:** Retrieval based on keywords and exact matching
+- **Use cases:** Precise term lookups, exact matching requirements
+- **Our implementation:** Incorporated as part of our hybrid search capability
+- **Comparison:** We combine this with vector search for both semantic and lexical matching
+
+#### **SQL Index**
+- **What it is:** Integration with SQL databases for structured data retrieval
+- **Use cases:** Structured data, complex filtering, joins across tables
+- **Our implementation:** We combine this with vector search through PostgreSQL integration
+- **Comparison:** We get the best of both worlds: structured queries and semantic search
+
+#### **KG Index (Knowledge Graph)**
+- **What it is:** Knowledge graph representation of document relationships
+- **Use cases:** Relationship-heavy domains, entity linking, complex querying
+- **Our implementation:** We implement limited graph-like features through entity recognition
+- **Comparison:** Our approach is more flexible while incorporating some KG benefits
 
 ### Why Vector Store Index with pgvector?
 
@@ -626,6 +658,7 @@ This application implements a Retrieval-Augmented Generation (RAG) system using 
      --set-env-vars="PG_DB=postgres" \
      --set-env-vars="PG_USER=postgres" \
      --set-env-vars="PG_PASSWORD=your_password_here" \
+     --set-env-vars="PG_PORT=5432" \
      --set-secrets="OPENAI_API_KEY=openai-api-key:latest" \
      --allow-unauthenticated \
      --add-cloudsql-instances=PROJECT:REGION:INSTANCE
