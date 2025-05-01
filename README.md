@@ -74,6 +74,48 @@ The application uses pgvector for storing and querying document embeddings. To s
 1. Ensure you have a PostgreSQL instance with pgvector extension enabled
 2. The application will automatically create the necessary vector tables when documents are processed
 
+## PostgreSQL Vector Store Enhancements
+
+This codebase includes several improvements to the PostgreSQL vector database integration:
+
+### Connection Handling Improvements
+- Added connection pooling for better performance and reliability
+- Implemented context managers for safer resource handling
+- Added automatic reconnection logic for more robust database access
+
+### Vector Search Enhancements
+- Added support for HNSW indices for faster approximate nearest neighbor search
+- Improved hybrid search capabilities (combining semantic and keyword search)
+- Added advanced filtering options for more precise query results
+- Implemented similarity thresholds to filter out low-relevance results
+
+### Database Management Tools
+- Added `pgvector_admin.py` utility for managing vector tables:
+  - List all vector tables in the database
+  - Verify table structures and indices
+  - Create and optimize HNSW indices
+  - Vacuum tables to improve performance
+  - Check database configuration and pgvector extension
+
+### Reliability Improvements
+- Enhanced error handling with fallback mechanisms
+  - Graceful degradation when optimal features aren't available
+  - Detailed logging for easier troubleshooting
+- Improved connection cleanup to prevent resource leaks
+- Added verification of pgvector extension and automatic configuration
+
+### Performance Optimizations
+- Increased embedding batch sizes for faster processing
+- Optimized index creation with proper HNSW parameters
+- Implemented progress tracking for long-running operations
+- Added table statistics gathering for better query planning
+
+To use the PostgreSQL vector store improvements:
+1. Ensure your PostgreSQL instance has pgvector extension installed
+2. Run the database check: `python app/pgvector_admin.py check-db`
+3. Optimize existing tables: `python app/pgvector_admin.py create-indices`
+4. Refer to the multi_table_rag.py and postgres_rag_tool.py files for usage examples
+
 ## Architecture
 
 - **Streamlit**: Web interface for document upload and Q&A

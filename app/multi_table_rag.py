@@ -2,18 +2,30 @@ import os
 import json
 import logging
 import time # Import time
+import psycopg2
+from psycopg2 import pool
+import threading
 
 # --- Add this line for debugging file loading ---
 print(f"--- Loading app/multi_table_rag.py @ {time.time()} ---")
 # -----------------------------------------------
 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from llama_index.core import VectorStoreIndex, StorageContext, Settings
 from llama_index.vector_stores.postgres import PGVectorStore
 from llama_index.llms.openai import OpenAI
 from llama_index.embeddings.openai import OpenAIEmbedding
+from llama_index.core.vector_stores import MetadataFilters, ExactMatchFilter
 import openai
-from db_config import get_pg_connection
+
+# Try importing with and without 'app.' prefix to handle different execution contexts
+try:
+    from db_config import get_pg_connection, check_postgres_connection
+except ImportError:
+    try:
+        from app.db_config import get_pg_connection, check_postgres_connection
+    except ImportError:
+        raise ImportError("Could not import db_config module. Make sure it exists in the correct location.")
 
 """
 IMPROVED RAG SYSTEM
@@ -25,11 +37,13 @@ This file contains improvements to the RAG system to make it more robust:
 3. Improved error handling: More detailed logging and fallback mechanisms when things go wrong
 4. Diagnostic tools: Verification functions to identify configuration issues
 5. Multiple retrieval strategies: Trying different queries and direct database access when standard retrieval fails
+6. Connection pooling: Using connection pools for better performance with PostgreSQL
 
 The most important improvements are:
 - The dedicated summarize_document method for direct document access
 - Enhanced detect_document_request for better document recognition
 - More logging throughout the codebase for easier debugging
+- Connection pooling for better PostgreSQL performance
 """
 
 class MultiTableRAGTool:
@@ -64,9 +78,15 @@ class MultiTableRAGTool:
         self.openai_model = openai_model
         self.llm = OpenAI(model=openai_model)
         
+        # Initialize connection pool for better performance
+        self._init_connection_pool()
+        
         # Discover available tables and their metadata
         self.table_configs = self._discover_table_configs()
         self.logger.info(f"Found {len(self.table_configs)} vector tables")
+        
+        # Create available_tables attribute from table_configs for backward compatibility
+        self.available_tables = [config["name"] for config in self.table_configs]
         
         # Initialize components
         self.vector_stores = {}
@@ -75,14 +95,85 @@ class MultiTableRAGTool:
         
         # Initialize vector stores and indexes
         self._initialize()
+        
+        # Verify PostgreSQL connection and pgvector extension
+        self.check_postgres_connection()
+    
+    def _init_connection_pool(self, min_conn=2, max_conn=10):
+        """Initialize a connection pool for better performance"""
+        try:
+            self.logger.info(f"Creating PostgreSQL connection pool with {min_conn}-{max_conn} connections")
+            self.connection_pool = psycopg2.pool.ThreadedConnectionPool(
+                minconn=min_conn,
+                maxconn=max_conn,
+                host=self.db_config["host"],
+                port=self.db_config["port"],
+                dbname=self.db_config["database"],
+                user=self.db_config["user"],
+                password=self.db_config["password"]
+            )
+            self.logger.info("Connection pool created successfully")
+        except Exception as e:
+            self.logger.error(f"Failed to create connection pool: {str(e)}")
+            self.connection_pool = None
+    
+    def _get_connection(self) -> Optional[psycopg2.extensions.connection]:
+        """Get a connection from the pool or create a new direct connection if pool fails"""
+        conn = None
+        try:
+            if self.connection_pool:
+                conn = self.connection_pool.getconn()
+                if conn:
+                    self.logger.debug("Got connection from pool")
+                    return conn
+        except Exception as e:
+            self.logger.warning(f"Error getting connection from pool: {str(e)}")
+        
+        # Fallback to direct connection
+        try:
+            self.logger.info("Falling back to direct connection")
+            conn = get_pg_connection()
+            return conn
+        except Exception as e:
+            self.logger.error(f"Failed to create direct connection: {str(e)}")
+            return None
+    
+    def _return_connection(self, conn):
+        """Return a connection to the pool if it came from there"""
+        if not conn:
+            return
+            
+        try:
+            if self.connection_pool:
+                self.connection_pool.putconn(conn)
+        except Exception as e:
+            self.logger.warning(f"Error returning connection to pool: {str(e)}")
+            try:
+                conn.close()
+            except:
+                pass
     
     def _discover_table_configs(self):
         """Automatically discover vector tables and extract their metadata"""
         table_configs = []
+        conn = None
         
         try:
-            conn = get_pg_connection()
+            conn = self._get_connection()
+            if not conn:
+                self.logger.error("Could not establish database connection for table discovery")
+                return []
+                
             cursor = conn.cursor()
+            
+            # First verify pgvector extension
+            try:
+                cursor.execute("SELECT extname, extversion FROM pg_extension WHERE extname = 'vector';")
+                pgvector_info = cursor.fetchone()
+                if not pgvector_info:
+                    self.logger.warning("pgvector extension not found - vector operations will not work")
+            except Exception as e:
+                self.logger.warning(f"Could not verify pgvector extension: {str(e)}")
             
             # Find all vector tables
             cursor.execute("""
@@ -93,9 +184,27 @@ class MultiTableRAGTool:
             
             tables = [table[0] for table in cursor.fetchall()]
             
+            if not tables:
+                self.logger.warning("No vector tables found in database")
+                return []
+                
+            self.logger.info(f"Found {len(tables)} vector tables: {', '.join(tables)}")
+            
             # Extract metadata for each table
             for table_name in tables:
                 try:
+                    # Check if table has the required vector column
+                    cursor.execute(f"""
+                        SELECT column_name, data_type 
+                        FROM information_schema.columns 
+                        WHERE table_name = '{table_name}' AND column_name = 'embedding';
+                    """)
+                    vector_col = cursor.fetchone()
+                    
+                    if not vector_col:
+                        self.logger.warning(f"Table {table_name} does not have an 'embedding' column")
+                        continue
+                        
                     # Get file names in this table
                     cursor.execute(f"""
                         SELECT DISTINCT metadata_->>'file_name' as file_name 
@@ -117,27 +226,42 @@ class MultiTableRAGTool:
                     doc_count = stats[0] if stats else 0
                     chunk_count = stats[1] if stats else 0
                     
+                    # Check for HNSW index on the table
+                    cursor.execute(f"""
+                        SELECT indexname, indexdef 
+                        FROM pg_indexes 
+                        WHERE tablename = '{table_name}' AND indexdef LIKE '%hnsw%'
+                    """)
+                    hnsw_indices = cursor.fetchall()
+                    has_hnsw = len(hnsw_indices) > 0
+                    
                     # Create table config
                     table_configs.append({
                         "name": table_name,
                         "description": f"Contains {doc_count} documents: {files_description}",
                         "embed_dim": 1536,
-                        "top_k": 3,
+                        "top_k": 5,
                         "hybrid_search": True,
                         "language": "english",
                         "files": file_names,
                         "doc_count": doc_count,
-                        "chunk_count": chunk_count
+                        "chunk_count": chunk_count,
+                        "has_hnsw": has_hnsw,
+                        "hnsw_indices": [idx[0] for idx in hnsw_indices] if has_hnsw else []
                     })
+                    
+                    self.logger.info(f"Table {table_name}: {doc_count} docs, {chunk_count} chunks, HNSW: {has_hnsw}")
                     
                 except Exception as e:
                     self.logger.error(f"Error extracting metadata for table {table_name}: {str(e)}")
             
             cursor.close()
-            conn.close()
             
         except Exception as e:
             self.logger.error(f"Error discovering tables: {str(e)}")
+        finally:
+            if conn:
+                self._return_connection(conn)
         
         return table_configs
     
@@ -149,86 +273,211 @@ class MultiTableRAGTool:
             try:
                 self.logger.info(f"Initializing resources for table: {table_name}")
                 
-                # Create vector store for this table
+                # Create vector store for this table with advanced configuration
                 vector_store_params = {
                     **self.db_config,  # Include all database config parameters
                     "table_name": table_name,
                     "embed_dim": table_config.get("embed_dim", 1536),
-                    "hybrid_search": False, # <-- Force disable hybrid search for querying test
-                    "text_search_config": table_config.get("language", "english"), # Explicitly set config
                 }
                 
+                # Add hybrid search configuration
+                if table_config.get("hybrid_search", True):
+                    self.logger.info(f"Enabling hybrid search for table {table_name}")
+                    vector_store_params["hybrid_search"] = True
+                    vector_store_params["text_search_config"] = table_config.get("language", "english")
+                
+                # Add HNSW configuration
+                # Check if table already has HNSW index
+                if table_config.get("has_hnsw", False):
+                    self.logger.info(f"Table {table_name} already has HNSW index: {table_config.get('hnsw_indices', [])}")
+                    # Use existing HNSW index
+                    hnsw_config = None
+                else:
+                    # Configure for HNSW creation
+                    self.logger.info(f"Setting up new HNSW parameters for {table_name}")
+                    hnsw_config = {
+                        "hnsw_m": 16,
+                        "hnsw_ef_construction": 64,
+                        "hnsw_ef_search": 40,
+                        "hnsw_dist_method": "vector_cosine_ops"
+                    }
+                
                 # Create embedding model
-                embed_model = OpenAIEmbedding(model="text-embedding-ada-002")
+                embed_model = OpenAIEmbedding(
+                    model="text-embedding-ada-002",
+                    embed_batch_size=100  # Larger batch size for better performance
+                )
                 
-                self.logger.info(f"Attempting PGVectorStore.from_params for {table_name}")
-                # 1. Create PGVectorStore
-                self.vector_stores[table_name] = PGVectorStore.from_params(**vector_store_params)
-                self.logger.info(f"SUCCESS: PGVectorStore created for {table_name}")
+                # Try to create PGVectorStore with connection pooling
+                # First, set up a special connection callback that uses our pool
+                def get_conn_callback():
+                    return self._get_connection()
                 
-                # Create the index
+                # Try to create PGVectorStore with HNSW index if needed
                 try:
-                    self.logger.info(f"Attempting VectorStoreIndex.from_vector_store for {table_name}")
+                    self.logger.info(f"Attempting to create PGVectorStore for {table_name}")
+                    
+                    # If we have an existing HNSW index, don't try to create a new one
+                    if hnsw_config:
+                        self.vector_stores[table_name] = PGVectorStore.from_params(
+                            **vector_store_params,
+                            hnsw_kwargs=hnsw_config,
+                            connection_creator=get_conn_callback if self.connection_pool else None
+                        )
+                    else:
+                        self.vector_stores[table_name] = PGVectorStore.from_params(
+                            **vector_store_params,
+                            connection_creator=get_conn_callback if self.connection_pool else None
+                        )
+                        
+                    self.logger.info(f"Successfully created PGVectorStore for {table_name}")
+                except Exception as hnsw_error:
+                    self.logger.warning(f"Failed to create PGVectorStore with custom connection: {hnsw_error}")
+                    self.logger.info("Falling back to standard configuration")
+                    # Try without custom connection handling if it fails
+                    self.vector_stores[table_name] = PGVectorStore.from_params(**vector_store_params)
+                    self.logger.info(f"Successfully created basic PGVectorStore for {table_name}")
+                
+                # Create the index with proper storage context
+                try:
+                    self.logger.info(f"Creating VectorStoreIndex for {table_name}")
+                    
+                    # Create storage context
+                    storage_context = StorageContext.from_defaults(
+                        vector_store=self.vector_stores[table_name]
+                    )
+                    
                     self.indexes[table_name] = VectorStoreIndex.from_vector_store(
                         self.vector_stores[table_name],
                         embed_model=embed_model,
-                        store_nodes_override=True
+                        storage_context=storage_context
                     )
-                    self.logger.info(f"SUCCESS: VectorStoreIndex created for {table_name}")
+                    self.logger.info(f"Successfully created VectorStoreIndex for {table_name}")
                 except Exception as e:
                     self.logger.error(f"Error loading index from table '{table_name}': {e}")
                     continue
                 
-                # Create query engine with metadata
+                # Create query engine with advanced configuration
+                self.logger.info(f"Creating QueryEngine for {table_name}")
+                similarity_top_k = table_config.get("top_k", 5)
+                
                 self.query_engines[table_name] = self.indexes[table_name].as_query_engine(
                     llm=self.llm,
-                    similarity_top_k=table_config.get("top_k", 5),
-                    response_mode="compact"
+                    similarity_top_k=similarity_top_k,
+                    # Use hybrid search if enabled in table config
+                    vector_store_query_mode="hybrid" if table_config.get("hybrid_search", True) else "default",
+                    response_mode="compact",
+                    # Add these parameters for improved search
+                    alpha=0.5,  # Adjust hybrid search balance 
+                    similarity_cutoff=0.7  # Only include results above this threshold
                 )
                 self.logger.info(f"SUCCESS: QueryEngine created for {table_name}")
                 
             except Exception as e:
                 self.logger.error(f"FAILED Outer Initialization for table {table_name}: {str(e)}")
     
-    def query_single_table(self, table_name, query_text):
-        """Query a single table"""
-        self.logger.info(f"Querying table '{table_name}' with: '{query_text}'")
+    def __del__(self):
+        """Cleanup connection pool on object destruction"""
+        try:
+            if hasattr(self, 'connection_pool') and self.connection_pool:
+                self.connection_pool.closeall()
+                self.logger.info("Connection pool closed")
+        except Exception as e:
+            self.logger.error(f"Error closing connection pool: {str(e)}")
+    
+    def check_postgres_connection(self):
+        """Verify PostgreSQL connection and check for pgvector extension"""
+        self.logger.info("Checking PostgreSQL connection and pgvector extension")
         
-        if table_name not in self.query_engines:
+        try:
+            conn = get_pg_connection()
+            cursor = conn.cursor()
+            
+            # Check PostgreSQL version
+            cursor.execute("SELECT version();")
+            pg_version = cursor.fetchone()[0]
+            self.logger.info(f"PostgreSQL connection successful. Version: {pg_version}")
+            
+            # Check if pgvector extension is installed
+            cursor.execute("""
+                SELECT extname, extversion 
+                FROM pg_extension 
+                WHERE extname = 'vector';
+            """)
+            
+            pgvector_info = cursor.fetchone()
+            
+            if pgvector_info:
+                self.logger.info(f"pgvector extension is installed. Version: {pgvector_info[1]}")
+            else:
+                self.logger.warning("pgvector extension is not installed. Vector operations will fail.")
+                self.logger.warning("To install pgvector, run: CREATE EXTENSION vector;")
+            
+            # Check if there are any vector tables
+            cursor.execute("""
+                SELECT COUNT(*) 
+                FROM information_schema.tables 
+                WHERE table_schema = 'public' AND 
+                (table_name LIKE 'vectors_%' OR table_name LIKE 'data_vectors_%')
+            """)
+            
+            vector_table_count = cursor.fetchone()[0]
+            self.logger.info(f"Found {vector_table_count} vector tables in the database")
+            
+            cursor.close()
+            conn.close()
+            
             return {
-                "error": f"Table '{table_name}' not found or not initialized",
-                "message": "The specified table does not exist or could not be loaded"
+                "postgres_connection": True,
+                "postgres_version": pg_version,
+                "pgvector_installed": pgvector_info is not None,
+                "pgvector_version": pgvector_info[1] if pgvector_info else None,
+                "vector_table_count": vector_table_count
+            }
+            
+        except Exception as e:
+            self.logger.error(f"PostgreSQL connection check failed: {str(e)}")
+            return {
+                "postgres_connection": False,
+                "error": str(e)
+            }
+    
+    def query_single_table(self, table_name, query_text, filters=None):
+        """Query a single table"""
+        self.logger.info(f"Querying table '{table_name}' with: '{query_text}' (filters: {filters})")
+        
+        if table_name not in self.indexes:
+            return {
+                "error": f"Table {table_name} not found or not initialized",
+                "message": f"The requested table {table_name} does not exist or could not be initialized"
             }
         
         try:
-            response = self.query_engines[table_name].query(query_text)
+            # Get the query engine
+            query_engine = self.query_engines[table_name]
             
-            # --- Debug: Log source nodes ---
-            self.logger.info(f"Raw response object type from query engine for table '{table_name}': {type(response)}")
-            if hasattr(response, 'source_nodes') and response.source_nodes:
-                self.logger.info(f"Query engine for table '{table_name}' returned {len(response.source_nodes)} source nodes.")
-                for i, node in enumerate(response.source_nodes):
-                    self.logger.info(f"  Node {i+1} Score: {node.score}")
-                    self.logger.info(f"  Node {i+1} Metadata: {node.node.metadata}")
-                    self.logger.info(f"  Node {i+1} Content Preview: {node.node.get_content()[:100]}...") # Log preview
-            else:
-                self.logger.warning(f"Query engine for table '{table_name}' returned NO source nodes.")
-            # --- End Debug ---
+            # Apply filters if provided
+            if filters:
+                # Create a retriever with filters
+                retriever = self.indexes[table_name].as_retriever(
+                    similarity_top_k=5,
+                    filters=filters
+                )
+                
+                # Create a filtered query engine
+                from llama_index.core.query_engine import RetrieverQueryEngine
+                query_engine = RetrieverQueryEngine.from_args(
+                    retriever=retriever,
+                    llm=self.llm
+                )
             
-            # Get the table config for additional info
-            table_config = next((conf for conf in self.table_configs if conf["name"] == table_name), {})
+            # Execute the query
+            self.logger.info(f"Executing query against table {table_name}")
+            response = query_engine.query(query_text)
             
-            # Check if the synthesized answer is empty
-            final_answer = str(response)
-            if not final_answer or final_answer.strip() == "Empty Response":
-                self.logger.warning(f"Query engine for table '{table_name}' produced an empty final answer string, despite potentially finding nodes.")
-                # Optionally, return a more informative message or error here if desired
-                # return {"error": "LLM synthesis failed", "message": "Retrieved nodes but couldn't generate answer."} 
-            
+            # Format response with sources
             result = {
-                "answer": final_answer, # Use the stored final_answer
-                "table": table_name,
-                "description": table_config.get("description", ""),
+                "answer": str(response),
                 "sources": []
             }
             
@@ -244,215 +493,112 @@ class MultiTableRAGTool:
                     result["sources"].append(source_info)
             
             return result
+        
         except Exception as e:
-            self.logger.error(f"Error querying table '{table_name}': {str(e)}")
+            self.logger.error(f"Error querying table {table_name}: {str(e)}")
             return {
                 "error": str(e),
-                "message": f"Failed to query table '{table_name}'"
+                "message": f"Error querying table {table_name}"
             }
-    
+            
     def query_all_tables(self, query_text):
-        """Query all tables and combine results"""
-        self.logger.info(f"Querying all tables with: '{query_text}'")
-        all_results = []
+        """Query across all available tables and combine results"""
+        self.logger.info(f"Querying across all {len(self.table_configs)} tables with: '{query_text}'")
+        
+        all_results = {}
         
         for table_config in self.table_configs:
             table_name = table_config["name"]
-            result = self.query_single_table(table_name, query_text)
-            if "error" not in result:
-                all_results.append(result)
+            try:
+                result = self.query_single_table(table_name, query_text)
+                all_results[table_name] = result
+            except Exception as e:
+                self.logger.error(f"Error querying table {table_name}: {str(e)}")
+                all_results[table_name] = {"error": str(e)}
         
         return all_results
     
     def determine_relevant_tables(self, query_text):
-        """Determine which tables are most relevant to the query"""
-        if not self.table_configs or len(self.table_configs) <= 1:
-            # If there's only one table or no tables, just return all
-            return [config["name"] for config in self.table_configs]
-            
-        self.logger.info(f"Determining relevant tables for query: '{query_text}'")
-        
-        try:
-            # Using OpenAI to determine relevance
-            table_descriptions = "\n".join([
-                f"- {config['name']}: {config['description']}"
-                for config in self.table_configs
-            ])
-            
-            prompt = f"""
-            Given the following question and available knowledge bases, which knowledge bases 
-            should be queried to provide the most relevant answer? Return only the names of 
-            the knowledge bases as a comma-separated list.
-            
-            Question: "{query_text}"
-            
-            Available knowledge bases:
-            {table_descriptions}
-            """
-            
-            response = openai.chat.completions.create(
-                model=self.openai_model,
-                messages=[
-                    {"role": "system", "content": "You are a system that determines which knowledge bases are relevant to a query."},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=50
-            )
-            
-            relevant_tables = response.choices[0].message.content.strip().split(",")
-            relevant_tables = [table.strip() for table in relevant_tables]
-            
-            self.logger.info(f"Selected relevant tables: {relevant_tables}")
-            return relevant_tables
-            
-        except Exception as e:
-            self.logger.error(f"Error determining relevant tables: {str(e)}")
-            # Fall back to using all tables if there's an error
-            return [config["name"] for config in self.table_configs]
+        """Determine which tables are most relevant for the given query"""
+        # Default implementation - can be enhanced with table embedding/similarity
+        # For now, we'll just use all tables
+        return [config["name"] for config in self.table_configs]
     
-    def query(self, query_text):
+    def query(self, query_text: str, model: str = "gpt-4") -> Dict[str, Any]:
         """
-        Query only relevant tables and synthesize a comprehensive answer
+        Query across all vector stores using the provided query text.
+        
+        Args:
+            query_text (str): The query text to search for
+            model (str): The model to use for the query (e.g., "gpt-4", "gpt-3.5-turbo")
+            
+        Returns:
+            Dict containing the response and metadata
         """
-        self.logger.info(f"RAG query received: '{query_text}'")
-        
-        # No tables available
-        if not self.table_configs:
-            self.logger.warning("No knowledge bases found to search")
-            return {
-                "answer": "I couldn't find any knowledge bases to search.",
-                "sources": []
-            }
-        
         try:
-            # --- Start: Comment out direct document handling INSIDE query method ---
-            # # Check for document request in the simplified format
-            # # This is a faster pre-check before going into the complex detection logic
+            self.logger.info(f"Processing query: {query_text}")
             
-            # document_request = False
-            # target_document = None
+            # Update the LLM model for this query
+            llm = OpenAI(model=model, temperature=0.1)
             
-            # # Get all available files
-            # files_info = self.get_files_in_database()
-            # all_files = files_info["all_files"]
-            
-            # # Quickly check if the query directly mentions any document names
-            # for file in all_files:
-            #     if file.lower() in query_text.lower():
-            #         document_request = True
-            #         target_document = file
-            #         self.logger.info(f"Direct document mention found: {target_document}")
-            #         break
-            
-            # # If found a direct document mention, use our specialized document function
-            # if document_request and target_document:
-            #     self.logger.info(f"Using specialized document function for '{target_document}'")
-            #     return self.summarize_document(target_document)
-            # --- End: Comment out direct document handling INSIDE query method ---
-            
-            # Standard query processing continues below
-            # Determine which tables are relevant to this query
-            self.logger.info("Determining relevant tables for the query")
-            relevant_tables = self.determine_relevant_tables(query_text)
-            self.logger.info(f"Relevant tables: {relevant_tables}")
-            
-            # Query only the relevant tables
-            table_results = []
-            for table_name in relevant_tables:
-                # Find the table config
-                table_config = next((config for config in self.table_configs if config["name"] == table_name), None)
-                if table_config:
-                    self.logger.info(f"Querying table: {table_name}")
-                    result = self.query_single_table(table_name, query_text)
-                    
-                    if "error" in result:
-                        self.logger.error(f"Error querying table {table_name}: {result['error']}")
-                    else:
-                        self.logger.info(f"Successfully queried table {table_name}")
-                        result["description"] = table_config.get("description", "")
-                        table_results.append(result)
-            
-            # If no results were found
-            if not table_results:
-                self.logger.warning("No results found in any table")
-                return {
-                    "answer": "I couldn't find relevant information in any of our knowledge bases.",
-                    "sources": []
-                }
-            
-            # Compile all sources for reference
+            # Initialize response storage
+            all_responses = []
             all_sources = []
-            for result in table_results:
-                for source in result.get("sources", []):
-                    source["table"] = result["table"]
-                    all_sources.append(source)
             
-            # If we only found one result, just return that
-            if len(table_results) == 1:
-                self.logger.info("Only one result found, returning directly")
+            # Query each vector store
+            for table_config in self.table_configs:
+                try:
+                    # Get the vector store for this table
+                    vector_store = table_config.get("vector_store")
+                    if not vector_store:
+                        self.logger.warning(f"No vector store found for table {table_config['name']}")
+                        continue
+                    
+                    # Create a query engine for this vector store
+                    query_engine = self._create_query_engine(vector_store, llm)
+                    
+                    # Query this vector store
+                    response = query_engine.query(query_text)
+                    
+                    if response and hasattr(response, 'response'):
+                        all_responses.append(response.response)
+                        
+                        # Add sources if available
+                        if hasattr(response, 'source_nodes'):
+                            for node in response.source_nodes:
+                                source = {
+                                    'text': node.text,
+                                    'score': node.score if hasattr(node, 'score') else None,
+                                    'file_name': node.metadata.get('file_name', 'unknown'),
+                                    'table': table_config['name']
+                                }
+                                all_sources.append(source)
+                    
+                except Exception as table_error:
+                    self.logger.error(f"Error querying table {table_config['name']}: {str(table_error)}")
+                    continue
+            
+            # If we got no responses, return an error
+            if not all_responses:
                 return {
-                    "answer": table_results[0]["answer"],
-                    "sources": all_sources
+                    "error": "No responses found",
+                    "message": "Could not find relevant information in any knowledge base."
                 }
             
-            # For multiple tables, synthesize the responses
-            self.logger.info(f"Synthesizing information from {len(table_results)} tables")
-            synthesis_prompt = self._create_synthesis_prompt(query_text, table_results)
+            # Combine all responses
+            combined_response = "\n\n".join(all_responses)
             
-            try:
-                self.logger.info("Calling OpenAI for synthesis")
-                response = openai.chat.completions.create(
-                    model=self.openai_model,
-                    messages=[
-                        {"role": "system", "content": "You are an assistant tasked with synthesizing information from multiple knowledge bases."},
-                        {"role": "user", "content": synthesis_prompt}
-                    ]
-                )
-                
-                synthesized_answer = response.choices[0].message.content
-                self.logger.info("Successfully synthesized answer")
-                
-                return {
-                    "answer": synthesized_answer,
-                    "sources": all_sources
-                }
-            except Exception as synthesis_error:
-                self.logger.error(f"Error during synthesis: {str(synthesis_error)}")
-                
-                # Fall back to simple concatenation
-                self.logger.info("Falling back to simple answer concatenation")
-                combined_answer = "I found information from multiple sources:\n\n"
-                for result in table_results:
-                    combined_answer += f"From {result['table']}: {result['answer']}\n\n"
-                
-                return {
-                    "answer": combined_answer,
-                    "sources": all_sources,
-                    "synthesis_error": str(synthesis_error)
-                }
+            # Create final response
+            return {
+                "answer": combined_response,
+                "sources": all_sources
+            }
             
         except Exception as e:
-            self.logger.error(f"Error in multi-table query: {str(e)}")
-            self.logger.exception("Detailed error traceback:")
-            
-            # If we have at least some results but another error occurred
-            if 'table_results' in locals() and table_results:
-                # Fall back to simple concatenation
-                self.logger.info("Error occurred but we have some results - falling back to simple concatenation")
-                combined_answer = "I found some information, but had trouble combining it properly. Here's what I found:\n\n"
-                for result in table_results:
-                    combined_answer += f"From {result['table']}: {result['answer']}\n\n"
-                
-                return {
-                    "answer": combined_answer,
-                    "sources": all_sources if 'all_sources' in locals() else [],
-                    "error": str(e)
-                }
-            
-            # Complete failure
+            self.logger.error(f"Error in query processing: {str(e)}")
             return {
                 "error": str(e),
-                "message": "Failed to query knowledge base"
+                "message": "An error occurred while processing your query."
             }
     
     def _create_synthesis_prompt(self, query, table_results):
@@ -542,7 +688,7 @@ class MultiTableRAGTool:
                     # Get sample content if vectors exist
                     if count > 0:
                         cursor.execute(f"""
-                            SELECT id, SUBSTRING(content, 1, 300) as content_preview
+                            SELECT id, SUBSTRING(text, 1, 300) as content_preview
                             FROM {table_name}
                             WHERE metadata_->>'file_name' = %s
                             LIMIT 3
@@ -824,6 +970,9 @@ class MultiTableRAGTool:
         table_results = []
         all_sources = []
         
+        # Prepare metadata filter for file_name
+        filters = MetadataFilters(filters=[ExactMatchFilter(key="file_name", value=document_name)])
+        
         # Try each table
         for table_name in doc_tables:
             # Find the table config
@@ -831,8 +980,8 @@ class MultiTableRAGTool:
             if table_config:
                 # Try each query until we get a good result
                 for query in queries:
-                    self.logger.info(f"Querying table {table_name} with query: {query}")
-                    result = self.query_single_table(table_name, query)
+                    self.logger.info(f"Querying table {table_name} with query: {query} and file_name filter")
+                    result = self.query_single_table(table_name, query, filters=filters)
                     if "error" not in result:
                         result["description"] = table_config.get("description", "")
                         table_results.append(result)
@@ -845,7 +994,7 @@ class MultiTableRAGTool:
                                 source.get("file_name", "").lower() in document_name.lower()):
                                 source["table"] = table_name
                                 all_sources.append(source)
-                                
+                        
                         # If we got a good result, no need to try more queries for this table
                         break
         
@@ -859,7 +1008,7 @@ class MultiTableRAGTool:
                 # Get content directly from the database - first try exact match
                 for table_name in doc_tables:
                     cursor.execute(f"""
-                        SELECT content
+                        SELECT text
                         FROM {table_name}
                         WHERE metadata_->>'file_name' = %s
                         LIMIT 10
@@ -870,7 +1019,7 @@ class MultiTableRAGTool:
                         # If no exact match, try case-insensitive
                         self.logger.info(f"Trying case-insensitive match in direct query for table {table_name}")
                         cursor.execute(f"""
-                            SELECT content
+                            SELECT text
                             FROM {table_name}
                             WHERE LOWER(metadata_->>'file_name') = LOWER(%s)
                             LIMIT 10
@@ -881,7 +1030,7 @@ class MultiTableRAGTool:
                         # If still no match, try partial match
                         self.logger.info(f"Trying partial match in direct query for table {table_name}")
                         cursor.execute(f"""
-                            SELECT content
+                            SELECT text
                             FROM {table_name}
                             WHERE LOWER(metadata_->>'file_name') LIKE %s
                             LIMIT 10
@@ -948,6 +1097,45 @@ class MultiTableRAGTool:
                 "sources": all_sources,
                 "synthesis_error": str(e)
             }
+
+    def _create_query_engine(self, vector_store, llm):
+        """
+        Create a query engine for the given vector store with the specified LLM.
+        
+        Args:
+            vector_store: The vector store to create a query engine for
+            llm: The LLM to use for the query engine
+            
+        Returns:
+            A configured query engine
+        """
+        from llama_index.core import VectorStoreIndex
+        from llama_index.core.retrievers import VectorIndexRetriever
+        from llama_index.core.query_engine import RetrieverQueryEngine
+        from llama_index.core.postprocessor import SimilarityPostprocessor
+        
+        # Create the index
+        index = VectorStoreIndex.from_vector_store(vector_store)
+        
+        # Configure the retriever with hybrid search
+        retriever = VectorIndexRetriever(
+            index=index,
+            similarity_top_k=5,  # Number of top results to consider
+            vector_store_kwargs={
+                "hybrid_search": True,  # Enable hybrid search
+                "alpha": 0.5,  # Balance between keyword and semantic search
+            }
+        )
+        
+        # Add a similarity score threshold
+        node_postprocessors = [SimilarityPostprocessor(similarity_cutoff=0.7)]
+        
+        # Create and return the query engine
+        return RetrieverQueryEngine(
+            retriever=retriever,
+            node_postprocessors=node_postprocessors,
+            llm=llm
+        )
 
 def create_multi_rag_tool_spec(available_files=None):
     """Create a specification for the multi-table RAG tool"""

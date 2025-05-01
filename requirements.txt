@@ -2,10 +2,11 @@ streamlit==1.36.0
 psycopg2-binary==2.9.9
 watchdog==3.0.0
 python-dotenv==1.0.0
+sqlalchemy>=2.0.0,<3.0.0
 # Core LlamaIndex packages with aligned versions
 llama-index-core==0.12.33
 llama-index-embeddings-openai==0.3.1
-llama-index-vector-stores-postgres==0.5.1
+llama-index-vector-stores-postgres==0.5.2
 llama-index-llms-openai==0.3.38
 llama-index-readers-file==0.4.7
 llama-index-multi-modal-llms-openai==0.4.3
@@ -14,3 +15,7 @@ pgvector>=0.2.4,<0.5.0
 pypdf>=4.0.1,<5.0.0
 docx2txt==0.8
 python-pptx==0.6.21
+# Add these dependencies for efficiency and robustness
+pandas>=2.0.0
+numpy>=1.24.0
+tenacity>=8.0.0

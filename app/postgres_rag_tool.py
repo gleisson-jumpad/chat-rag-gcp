@@ -5,7 +5,15 @@ from llama_index.core import VectorStoreIndex, SimpleDirectoryReader, StorageCon
 from llama_index.vector_stores.postgres import PGVectorStore
 from llama_index.llms.openai import OpenAI
 from llama_index.embeddings.openai import OpenAIEmbedding
-from db_config import get_pg_connection
+
+# Try importing with and without 'app.' prefix to handle different execution contexts
+try:
+    from db_config import get_pg_connection, get_pg_cursor, return_pg_connection, verify_vector_table, ensure_pgvector_extension
+except ImportError:
+    try:
+        from app.db_config import get_pg_connection, get_pg_cursor, return_pg_connection, verify_vector_table, ensure_pgvector_extension
+    except ImportError:
+        raise ImportError("Could not import db_config module. Make sure it exists in the correct location.")
 
 class PostgresRAGTool:
     def __init__(
@@ -15,7 +23,7 @@ class PostgresRAGTool:
         password=None, 
         port=5432, 
         user="llamaindex",
-        openai_model="gpt-4o",
+        openai_model="gpt-4",
         embed_dim=1536,
         use_hybrid_search=True
     ):
@@ -41,28 +49,53 @@ class PostgresRAGTool:
         self.indices = {}
         self.query_engines = {}
         
+        # Make sure pgvector extension is installed
+        self._ensure_pgvector()
+        
         # Get available vector tables from database
         self.available_tables = self._get_available_tables()
         self.logger.info(f"Found {len(self.available_tables)} available vector tables")
     
+    def _ensure_pgvector(self):
+        """Ensure that pgvector extension is installed in the database"""
+        try:
+            if ensure_pgvector_extension():
+                self.logger.info("pgvector extension is installed and ready")
+            else:
+                self.logger.warning("Could not ensure pgvector extension installation - vector operations may fail")
+        except Exception as e:
+            self.logger.error(f"Error checking pgvector extension: {str(e)}")
+    
     def _get_available_tables(self):
         """Get a list of all available vector tables in the database"""
         try:
-            conn = get_pg_connection()
-            cursor = conn.cursor()
-            
-            # Query to find vector tables
-            cursor.execute("""
-                SELECT table_name FROM information_schema.tables 
-                WHERE table_schema = 'public' AND 
-                (table_name LIKE 'vectors_%' OR table_name LIKE 'data_vectors_%')
-            """)
-            
-            tables = [table[0] for table in cursor.fetchall()]
-            cursor.close()
-            conn.close()
-            
-            return tables
+            with get_pg_cursor() as cursor:
+                # Query to find vector tables
+                cursor.execute("""
+                    SELECT table_name FROM information_schema.tables 
+                    WHERE table_schema = 'public' AND 
+                    (table_name LIKE 'vectors_%' OR table_name LIKE 'data_vectors_%')
+                """)
+                
+                tables = [table[0] for table in cursor.fetchall()]
+                
+                # Get basic stats for each table
+                table_stats = {}
+                for table_name in tables:
+                    try:
+                        # Check if table has the required structure
+                        table_info = verify_vector_table(table_name)
+                        if table_info["exists"] and table_info["vector_column"]:
+                            self.logger.info(f"Table {table_name} is a valid vector table with {table_info['row_count']} rows")
+                            table_stats[table_name] = table_info
+                        else:
+                            self.logger.warning(f"Table {table_name} exists but is not a valid vector table")
+                    except Exception as e:
+                        self.logger.error(f"Error verifying table {table_name}: {str(e)}")
+                
+                self.table_stats = table_stats
+                return tables
+                
         except Exception as e:
             self.logger.error(f"Error getting available tables: {str(e)}")
             return []
@@ -78,6 +111,16 @@ class PostgresRAGTool:
                     self.logger.error(f"Table {table_name} is not available")
                     raise ValueError(f"Table {table_name} does not exist in the database")
                 
+                # Verify table has proper structure
+                table_info = verify_vector_table(table_name)
+                if not table_info["exists"] or not table_info["vector_column"]:
+                    self.logger.error(f"Table {table_name} does not have proper vector structure")
+                    raise ValueError(f"Table {table_name} is not properly configured for vector search")
+                
+                # Create the connection callback
+                def get_conn_callback():
+                    return get_pg_connection()
+                
                 # Create vector store for this table
                 vector_store_params = {
                     "database": self.db_name,
@@ -87,31 +130,92 @@ class PostgresRAGTool:
                     "user": self.user,
                     "table_name": table_name,
                     "embed_dim": self.embed_dim,
+                    "use_jsonb": True,
+                    "connection_creator": get_conn_callback
                 }
                 
                 # Add hybrid search if enabled
                 if self.use_hybrid_search:
-                    vector_store_params["hybrid_search"] = True
-                    vector_store_params["text_search_config"] = "english"
+                    self.logger.info("Enabling hybrid search with English text configuration")
+                    vector_store_params.update({
+                        "hybrid_search": True,
+                        "text_search_config": "english",
+                    })
                 
-                # Create the vector store
-                self.vector_stores[table_name] = PGVectorStore.from_params(**vector_store_params)
+                # Add HNSW configuration if needed
+                if table_info.get("has_index", False):
+                    # Check if any HNSW indices exist
+                    has_hnsw = any(idx.get("type") == "hnsw" 
+                                for idx in table_info.get("indices", []) 
+                                if isinstance(idx, dict) and "type" in idx)
+                    if has_hnsw:
+                        self.logger.info(f"Table {table_name} already has HNSW index, using existing index")
+                    else:
+                        # Set up HNSW configuration since table has no HNSW index
+                        vector_store_params["hnsw_kwargs"] = {
+                            "hnsw_m": 16,
+                            "hnsw_ef_construction": 64,
+                            "hnsw_ef_search": 40,
+                            "hnsw_dist_method": "vector_cosine_ops"
+                        }
+                        self.logger.info(f"Table {table_name} has no HNSW index, will try to create one")
+                else:
+                    # No index exists, create HNSW
+                    vector_store_params["hnsw_kwargs"] = {
+                        "hnsw_m": 16,
+                        "hnsw_ef_construction": 64,
+                        "hnsw_ef_search": 40,
+                        "hnsw_dist_method": "vector_cosine_ops"
+                    }
+                    self.logger.info(f"Table {table_name} has no vector index, will try to create HNSW index")
                 
-                # Create embedding model
-                embed_model = OpenAIEmbedding(model="text-embedding-ada-002")
+                self.logger.info(f"Creating vector store with params: {vector_store_params}")
+                
+                # Create the vector store with connection callback first
+                try:
+                    self.vector_stores[table_name] = PGVectorStore.from_params(**vector_store_params)
+                    self.logger.info(f"Successfully created vector store for {table_name} with connection callback")
+                except Exception as vs_error:
+                    self.logger.error(f"Failed to create vector store with connection callback: {vs_error}")
+                    
+                    # Try fallback without connection callback
+                    self.logger.info("Trying fallback without connection callback")
+                    vector_store_params.pop("connection_creator", None)
+                    self.vector_stores[table_name] = PGVectorStore.from_params(**vector_store_params)
+                    self.logger.info(f"Successfully created fallback vector store for {table_name}")
+                
+                # Create embedding model with larger batch size
+                self.logger.info("Creating OpenAI embedding model")
+                embed_model = OpenAIEmbedding(model="text-embedding-ada-002", embed_batch_size=100)
                 
                 # Create index from vector store
+                self.logger.info(f"Creating index from vector store for {table_name}")
+                storage_context = StorageContext.from_defaults(vector_store=self.vector_stores[table_name])
+                
                 self.indices[table_name] = VectorStoreIndex.from_vector_store(
                     self.vector_stores[table_name],
-                    embed_model=embed_model
+                    embed_model=embed_model,
+                    storage_context=storage_context
                 )
                 
-                # Create query engine
+                # Create query engine with appropriate configuration
+                self.logger.info(f"Creating query engine for {table_name}")
                 self.query_engines[table_name] = self.indices[table_name].as_query_engine(
                     llm=self.llm,
-                    similarity_top_k=3,
-                    response_mode="compact"
+                    similarity_top_k=5,  # Increased from 3 for better recall
+                    response_mode="compact",
+                    # If hybrid search is enabled, use it in the query
+                    vector_store_query_mode="hybrid" if self.use_hybrid_search else "default",
+                    alpha=0.5 if self.use_hybrid_search else None,
+                    # similarity_cutoff moved to post-processors
+                    verbose=True
                 )
+                
+                # Add similarity cutoff as a post-processor
+                from llama_index.core.postprocessor import SimilarityPostprocessor
+                self.query_engines[table_name].retriever.node_postprocessors = [
+                    SimilarityPostprocessor(similarity_cutoff=0.7)  # Only include results above this threshold
+                ]
                 
                 self.logger.info(f"Successfully initialized query engine for table: {table_name}")
                 return True
@@ -178,28 +282,33 @@ class PostgresRAGTool:
         files_by_table = {}
         
         try:
-            conn = get_pg_connection()
-            cursor = conn.cursor()
-            
-            for table_name in self.available_tables:
-                try:
-                    # Query to extract file names from metadata
-                    cursor.execute(f"""
-                        SELECT DISTINCT metadata_->>'file_name' as file_name 
-                        FROM {table_name}
-                        WHERE metadata_->>'file_name' IS NOT NULL
-                    """)
-                    
-                    # Get unique filenames
-                    distinct_files = [file[0] for file in cursor.fetchall() if file[0]]
-                    
-                    if distinct_files:
-                        files_by_table[table_name] = distinct_files
-                except Exception as e:
-                    self.logger.error(f"Error getting files from table {table_name}: {str(e)}")
-            
-            cursor.close()
-            conn.close()
+            with get_pg_cursor() as cursor:
+                # Handle both MultiTableRAGTool (which uses table_configs) and PostgresRAGTool classes
+                table_names = []
+                if hasattr(self, 'available_tables'):
+                    table_names = self.available_tables
+                elif hasattr(self, 'table_configs'):
+                    table_names = [config["name"] for config in self.table_configs]
+                else:
+                    self.logger.error("No table information available")
+                    return {"files_by_table": {}, "all_files": []}
+                
+                for table_name in table_names:
+                    try:
+                        # Query to extract file names from metadata
+                        cursor.execute(f"""
+                            SELECT DISTINCT metadata_->>'file_name' as file_name 
+                            FROM {table_name}
+                            WHERE metadata_->>'file_name' IS NOT NULL
+                        """)
+                        
+                        # Get unique filenames
+                        distinct_files = [file[0] for file in cursor.fetchall() if file[0]]
+                        
+                        if distinct_files:
+                            files_by_table[table_name] = distinct_files
+                    except Exception as e:
+                        self.logger.error(f"Error getting files from table {table_name}: {str(e)}")
             
             # Also create a flat list of all files
             all_files = []
@@ -215,105 +324,124 @@ class PostgresRAGTool:
             self.logger.error(f"Error getting files from database: {str(e)}")
             return {"files_by_table": {}, "all_files": []}
 
-def create_rag_tool_spec(available_files=None):
-    """Create a specification for the RAG tool that the LLM can call when needed"""
-    description = "Search the knowledge base for information that the model does not know. Only use this tool when you need specific information from documents or data that wouldn't be in your training data. Don't use this for general knowledge questions you can answer yourself."
-    
-    # Add information about available files if provided
-    if available_files and len(available_files) > 0:
-        files_list = ", ".join(available_files[:10])
-        if len(available_files) > 10:
-            files_list += f", and {len(available_files) - 10} more"
-        description += f"\n\nThe knowledge base contains information from the following documents: {files_list}."
-    
-    return {
-        "type": "function",
-        "function": {
-            "name": "query_knowledge_base",
-            "description": description,
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "The specific question to ask the knowledge base. Formulate this as precisely as possible to get the most relevant information."
-                    },
-                    "table_name": {
-                        "type": "string",
-                        "description": "Optional. The specific table to query. Leave blank to use the default table."
-                    }
-                },
-                "required": ["query"]
-            }
-        }
-    }
-
 def process_message_with_selective_rag(user_message, rag_tool, model="gpt-4o"):
-    """Process a user message, using RAG only when necessary based on LLM's decision"""
+    """Process a user message with selective RAG (only use RAG when needed)"""
     import openai
+    import logging
     
-    # Ensure the OpenAI API key is set
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        return "Error: OPENAI_API_KEY is not set in the environment"
+    # Configure logging
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    logger = logging.getLogger("selective_rag")
     
-    # Get list of available files
+    logger.info(f"Processing message with selective RAG: '{user_message}'")
+    
+    # Ensure we have the OpenAI API key
+    openai_api_key = os.getenv("OPENAI_API_KEY")
+    if not openai_api_key:
+        logger.error("OPENAI_API_KEY environment variable not set")
+        return "ERROR: OpenAI API key not set in environment variables"
+    
+    # Get a list of available documents
     files_info = rag_tool.get_files_in_database()
-    available_files = files_info["all_files"]
+    available_docs = files_info["all_files"]
     
-    logging.info(f"Processing message: '{user_message}'")
-    messages = [{"role": "user", "content": user_message}]
+    # Create a prompt for assessing if RAG is needed
+    rag_assessment_messages = [
+        {"role": "system", "content": 
+         f"You are an assistant that decides whether to use RAG (Retrieval Augmented Generation) for a user query. "
+         f"The knowledge base contains the following documents: {', '.join(available_docs) if available_docs else 'No documents available'}. "
+         f"Respond with 'RAG:YES' if the query likely requires information from these documents, "
+         f"or 'RAG:NO' if the query can be answered without them."},
+        {"role": "user", "content": user_message}
+    ]
     
     try:
-        # First call to decide if RAG is needed
-        response = openai.chat.completions.create(
+        logger.info("Making initial assessment of whether RAG is needed")
+        assessment_response = openai.chat.completions.create(
             model=model,
-            messages=messages,
-            tools=[create_rag_tool_spec(available_files)],
-            tool_choice="auto"  # Let the model decide whether to use the tool
+            messages=rag_assessment_messages,
+            max_tokens=50
         )
         
-        assistant_message = response.choices[0].message
+        assessment_text = assessment_response.choices[0].message.content
+        logger.info(f"RAG assessment: {assessment_text}")
         
-        # If the model chose to use the RAG tool
-        if assistant_message.tool_calls:
-            logging.info("LLM decided to use the RAG tool")
+        use_rag = "RAG:YES" in assessment_text.upper()
+        
+        if use_rag and available_docs:
+            logger.info("Decision: Use RAG for this query")
             
-            tool_call = assistant_message.tool_calls[0]
-            function_name = tool_call.function.name
+            # Get tables containing documents - handle different class types
+            if hasattr(rag_tool, 'available_tables'):
+                tables = list(rag_tool.available_tables)
+            elif hasattr(rag_tool, 'table_configs'):
+                tables = [config["name"] for config in rag_tool.table_configs]
+            else:
+                logger.error("RAG tool has neither 'available_tables' nor 'table_configs' attributes")
+                tables = []
             
-            if function_name == "query_knowledge_base":
-                # Parse the function arguments
-                function_args = json.loads(tool_call.function.arguments)
-                query = function_args.get("query")
-                table_name = function_args.get("table_name")
+            # If multiple tables, try to identify the most relevant one
+            table_to_use = tables[0] if tables else None
+            
+            if table_to_use:
+                # Query RAG with the user message - handle different tool types
+                logger.info(f"Querying RAG system with table: {table_to_use}")
                 
-                # Call the RAG tool
-                logging.info(f"Calling RAG tool with query: '{query}'")
-                rag_response = rag_tool.query(query, table_name)
+                # Detect which type of tool we're using
+                if hasattr(rag_tool, 'query_single_table'):
+                    # This is likely a MultiTableRAGTool
+                    logger.info("Using MultiTableRAGTool.query_single_table")
+                    rag_result = rag_tool.query_single_table(table_to_use, user_message)
+                else:
+                    # This is the older PostgresRAGTool
+                    logger.info("Using PostgresRAGTool.query")
+                    rag_result = rag_tool.query(user_message, table_to_use)
                 
-                # Add the assistant message and tool response to the conversation
-                messages.append(assistant_message)
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "name": function_name,
-                    "content": json.dumps(rag_response)
-                })
+                if "error" in rag_result:
+                    logger.error(f"Error querying RAG: {rag_result['error']}")
+                    return f"I attempted to search the knowledge base but encountered an error: {rag_result['error']}"
+                
+                # Create a prompt that integrates the RAG response
+                final_prompt_messages = [
+                    {"role": "system", "content": 
+                     "You are a helpful assistant. Answer the user's question based on your knowledge and the provided RAG results."},
+                    {"role": "user", "content": user_message},
+                    {"role": "system", "content": 
+                     f"RAG RESULTS: {rag_result['answer']}\n\n" +
+                     f"SOURCES: {json.dumps(rag_result['sources'], indent=2)}\n\n" +
+                     "Use the RAG results to enrich your response, but maintain a natural, direct style. " +
+                     "Only mention the sources if they're particularly relevant or if the user asks for references."}
+                ]
                 
                 # Get the final response
-                logging.info("Getting final response after RAG lookup")
+                logger.info("Generating final response using RAG results")
                 final_response = openai.chat.completions.create(
                     model=model,
-                    messages=messages
+                    messages=final_prompt_messages
                 )
                 
                 return final_response.choices[0].message.content
+            else:
+                logger.warning("No table available for RAG, falling back to normal response")
+                # Fall through to non-RAG response
+        else:
+            if not available_docs:
+                logger.warning("No documents available in the knowledge base")
+            else:
+                logger.info("Decision: RAG not needed for this query")
         
-        # If the model didn't need to use the RAG tool
-        logging.info("LLM decided NOT to use the RAG tool")
-        return assistant_message.content
-    
+        # Process without RAG
+        logger.info("Generating response without RAG")
+        direct_response = openai.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": user_message}
+            ]
+        )
+        
+        return direct_response.choices[0].message.content
+        
     except Exception as e:
-        logging.error(f"Error in process_message_with_selective_rag: {str(e)}")
+        logger.error(f"Error in process_message_with_selective_rag: {str(e)}")
         return f"An error occurred: {str(e)}" 

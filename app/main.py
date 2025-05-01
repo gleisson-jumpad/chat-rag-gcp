@@ -169,12 +169,37 @@ elif menu == "🔍 Consulta com RAG":
         
     # Initialize multi-table RAG tool if not already done
     if 'multi_rag_tool' not in st.session_state:
-        from multi_table_rag import MultiTableRAGTool
+        from app.multi_table_rag import MultiTableRAGTool
         with st.spinner("Inicializando ferramenta RAG multi-tabela..."):
             try:
+                # Validate OpenAI API key first
+                openai_api_key = os.getenv("OPENAI_API_KEY")
+                if not openai_api_key:
+                    st.error("❌ OPENAI_API_KEY não está definida no ambiente.")
+                    st.info("Configure a chave API da OpenAI nas variáveis de ambiente ou no arquivo .env")
+                    st.stop()
+                
+                # Initialize the RAG tool
                 st.session_state.multi_rag_tool = MultiTableRAGTool()
+                
+                # Run database checks
+                db_status = st.session_state.multi_rag_tool.check_postgres_connection()
+                if not db_status.get("postgres_connection", False):
+                    st.error(f"❌ Falha na conexão com PostgreSQL: {db_status.get('error', 'Erro desconhecido')}")
+                    st.warning("Verifique as configurações do banco de dados e a conexão com a internet.")
+                    st.stop()
+                
+                if not db_status.get("pgvector_installed", False):
+                    st.warning("⚠️ Extensão pgvector não está instalada no PostgreSQL.")
+                    st.info("As operações vetoriais não funcionarão sem essa extensão.")
+                
+                # Check for vector tables
+                if db_status.get("vector_table_count", 0) == 0:
+                    st.warning("⚠️ Nenhuma tabela de vetores encontrada no banco de dados.")
+                    st.info("Faça upload de documentos na seção 'Upload e Vetorização de Arquivos' primeiro.")
+                
             except Exception as init_error:
-                st.error(f"Erro ao inicializar MultiTableRAGTool: {init_error}")
+                st.error(f"❌ Erro ao inicializar MultiTableRAGTool: {init_error}")
                 st.warning("Verifique as configurações do banco de dados e a chave da API OpenAI.")
                 st.stop() # Stop execution if initialization fails
     
@@ -199,68 +224,34 @@ elif menu == "🔍 Consulta com RAG":
             "GPT-4o": "gpt-4o",
             "GPT-4o-mini": "gpt-4o-mini"
         }
-        selected_model = st.selectbox(
-            "Selecione o modelo:",
-            options=list(model_options.keys()),
-            index=1,  # Default to GPT-4o
-            label_visibility="collapsed"
-        )
+        selected_model = st.radio("", list(model_options.keys()), index=1)
         model_id = model_options[selected_model]
         
-        # Multi-RAG info
         st.markdown("---")
-        st.info(
-            "ℹ️ **Sobre o RAG Multi-Tabela:**\n\n"
-            "Este modo avançado permite que a IA busque em múltiplas tabelas de vetores simultaneamente. "
-            "O sistema decidirá automaticamente quais tabelas são relevantes para sua consulta "
-            "e combinará as informações encontradas em uma resposta coerente."
-        )
         
-        # Get tables information
-        tables_info = st.session_state.multi_rag_tool.get_tables_info()
-        tables = tables_info["tables"]
+        # Get table information for display
+        tables_info = []
+        for table_config in st.session_state.multi_rag_tool.table_configs:
+            tables_info.append({
+                "name": table_config["name"],
+                "docs": table_config.get("doc_count", "?"),
+                "chunks": table_config.get("chunk_count", "?"),
+                "files": table_config.get("files", [])
+            })
         
-        # Display all tables and their files
-        if tables:
-            st.markdown("---")
-            st.markdown(f"🗃️ **Tabelas Disponíveis:** {len(tables)}")
-            
-            with st.expander("Ver detalhes das tabelas"):
-                for idx, table in enumerate(tables):
-                    st.markdown(f"**{idx+1}. {table['name']}**")
-                    st.markdown(f"- Descrição: {table['description']}")
-                    st.markdown(f"- Documentos: {table['doc_count']}")
-                    st.markdown(f"- Chunks: {table['chunk_count']}")
-                    
-                    # Show files in this table
-                    if 'files' in table and table['files']:
+        # Display tables information in sidebar
+        if tables_info:
+            st.markdown("**Tabelas de Conhecimento:**")
+            for table in tables_info:
+                with st.expander(f"{table['name']} ({table['docs']} docs)"):
+                    st.write(f"Chunks: {table['chunks']}")
+                    if table['files']:
                         st.markdown("**Arquivos:**")
                         for file in table['files']:
                             st.markdown(f"- {file}")
-                    
-                    st.markdown("---")
         else:
-            st.warning("⚠️ Nenhuma tabela de vetores encontrada")
-        
-        # Display files in database
-        files_info = st.session_state.multi_rag_tool.get_files_in_database()
-        all_files = files_info["all_files"]
-        
-        if all_files:
-            st.markdown("---")
-            st.markdown(f"📚 **Documentos Disponíveis:** {len(all_files)}")
-            
-            with st.expander("Ver todos os documentos"):
-                for file in sorted(all_files):
-                    st.markdown(f"- {file}")
-        else:
-            st.warning("⚠️ Nenhum documento encontrado na base de dados")
-        
-        # Add reset button at the bottom of sidebar
-        st.markdown("---")
-        if st.button("🗑️ Limpar Conversa", use_container_width=True):
-            st.session_state.messages = []
-            st.rerun()
+            st.info("Nenhuma tabela de dados encontrada")
+            st.markdown("Faça o upload de documentos na seção **Upload e Vetorização de Arquivos**")
     
     # Display chat messages from history
     for message in st.session_state.messages:
@@ -268,394 +259,172 @@ elif menu == "🔍 Consulta com RAG":
             st.markdown(message["content"])
     
     # Accept user input
-    user_query = st.chat_input("Sua pergunta:")
-    
-    if user_query:
-        # Import the multi-table RAG processing function
-        from multi_table_rag import process_message_with_multi_rag
-        
+    if prompt := st.chat_input("Digite sua pergunta..."):
         # Add user message to chat history
-        st.session_state.messages.append({"role": "user", "content": user_query})
+        st.session_state.messages.append({"role": "user", "content": prompt})
         
         # Display user message in chat
         with st.chat_message("user"):
-            st.markdown(user_query)
+            st.markdown(prompt)
         
-        # Display assistant response
+        # Generate and display response
         with st.chat_message("assistant"):
-            message_placeholder = st.empty()
-            message_placeholder.markdown("🔍 Analisando sua pergunta...")
-            
-            try:
-                # Process message with multi-table RAG
-                with st.spinner("Consultando múltiplas bases de conhecimento..."):
-                    response = process_message_with_multi_rag(
-                        user_query, 
-                        st.session_state.multi_rag_tool,
+            with st.spinner("Procurando nos documentos..."):
+                try:
+                    # Create a robust system prompt for better RAG
+                    system_prompt = """
+                    Você é um assistente de IA especializado em responder perguntas com base em documentos específicos. 
+                    Analise cuidadosamente as informações fornecidas pela ferramenta RAG e utilize apenas essas informações ao responder.
+                    
+                    Diretrizes importantes:
+                    - Responda SOMENTE com base nos documentos fornecidos
+                    - Se a informação não estiver clara nos documentos, admita que não sabe
+                    - Não invente ou infira informações além do que está explicitamente nos documentos
+                    - Seja direto e conciso em suas respostas
+                    """
+                    
+                    # Process the message with RAG integration
+                    from app.postgres_rag_tool import process_message_with_selective_rag
+                    
+                    response = process_message_with_selective_rag(
+                        prompt, 
+                        st.session_state.multi_rag_tool, 
                         model=model_id
                     )
-                
-                # Display the response
-                message_placeholder.markdown(response)
-                
-                # Add assistant response to chat history
-                st.session_state.messages.append({"role": "assistant", "content": response})
+                    
+                    # Check for empty responses
+                    if not response or response.strip() == "":
+                        response = "Não consegui encontrar informações relevantes nos documentos para responder essa pergunta."
+                    
+                    # Display the response
+                    st.markdown(response)
+                    
+                except Exception as e:
+                    error_msg = f"❌ Erro ao processar a consulta: {str(e)}"
+                    st.error(error_msg)
+                    response = error_msg
             
-            except Exception as e:
-                error_message = f"❌ **Erro ao processar a mensagem:** {str(e)}"
-                message_placeholder.markdown(error_message)
-                st.session_state.messages.append({"role": "assistant", "content": error_message})
+            # Add response to chat history
+            st.session_state.messages.append({"role": "assistant", "content": response})
 
 elif menu == "🧪 Diagnóstico Avançado":
-    st.subheader("🧪 Diagnóstico e Depuração")
+    st.subheader("🧪 Diagnóstico do Sistema RAG")
     
-    # Database connection test
-    st.subheader("Teste de Conexão ao Banco de Dados")
+    # Check OpenAI API key
+    api_key_tab, db_tab, vector_tab = st.tabs(["API OpenAI", "Banco de Dados", "Tabelas Vetoriais"])
     
-    if st.button("Testar Conexão ao PostgreSQL"):
-        try:
-            from db_config import get_pg_connection
-            conn = get_pg_connection()
-            
-            # Test the connection by executing a simple query
-            cursor = conn.cursor()
-            cursor.execute("SELECT version();")
-            version = cursor.fetchone()[0]
-            
-            st.success("✅ Conexão estabelecida com sucesso!")
-            st.code(version)
-            
-            cursor.close()
-            conn.close()
-        except Exception as e:
-            st.error(f"❌ Erro ao conectar ao banco de dados: {str(e)}")
-    
-    # Check for vector tables
-    st.subheader("Tabelas de Vetores no Banco")
-    
-    if st.button("Verificar Tabelas de Vetores"):
-        try:
-            from rag_utils import get_existing_tables
-            vector_tables = get_existing_tables()
-            
-            if vector_tables:
-                st.success(f"✅ Encontradas {len(vector_tables)} tabelas de vetores:")
-                for table in vector_tables:
-                    st.code(table)
-            else:
-                st.warning("⚠️ Não foram encontradas tabelas de vetores no banco de dados.")
-        except Exception as e:
-            st.error(f"❌ Erro ao verificar tabelas: {str(e)}")
-    
-    # Environment variables check
-    st.subheader("Variáveis de Ambiente")
-    
-    if st.button("Verificar Variáveis de Ambiente"):
-        env_vars = {
-            "DB_PUBLIC_IP": os.getenv("DB_PUBLIC_IP"),
-            "PG_PORT": os.getenv("PG_PORT"),
-            "PG_DB": os.getenv("PG_DB"),
-            "PG_USER": os.getenv("PG_USER"),
-            "PG_PASSWORD": "*****" if os.getenv("PG_PASSWORD") else None,
-            "OPENAI_API_KEY": "*****" if os.getenv("OPENAI_API_KEY") else None
-        }
-        
-        st.json(env_vars)
-    
-    # Session state debug
-    st.subheader("Estado da Sessão (Session State)")
-    
-    if st.button("Verificar Estado da Sessão"):
-        debug_info = {
-            "session_id": st.session_state.get("session_id", None),
-            "uploaded_files_count": len(st.session_state.get("uploaded_files", [])),
-            "uploaded_files": st.session_state.get("uploaded_files", []),
-            "messages_count": len(st.session_state.get("messages", []))
-        }
-        
-        st.json(debug_info)
-    
-    # Force refresh session
-    if st.button("Limpar e Recarregar Sessão"):
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
-        st.success("Sessão limpa com sucesso!")
-        st.rerun()
-    
-    # Database query tool
-    st.subheader("Ferramenta de Consulta SQL")
-    
-    # Predefined queries
-    predefined_queries = {
-        "Contar documentos distintos": "SELECT COUNT(DISTINCT metadata_->>'file_name') as documentos_distintos FROM data_vectors_5bed5a54_76f3_4a10_bb16_176d8fecc104;",
-        "Listar arquivos distintos": "SELECT DISTINCT metadata_->>'file_name' as nome_arquivo FROM data_vectors_5bed5a54_76f3_4a10_bb16_176d8fecc104;",
-        "Contar chunks por arquivo": "SELECT metadata_->>'file_name' as nome_arquivo, COUNT(*) as numero_chunks FROM data_vectors_5bed5a54_76f3_4a10_bb16_176d8fecc104 GROUP BY metadata_->>'file_name';",
-        "Ver metadados dos documentos": "SELECT id, metadata_ FROM data_vectors_5bed5a54_76f3_4a10_bb16_176d8fecc104 LIMIT 10;",
-        "Ver conteúdo dos documentos": "SELECT id, metadata_->>'file_name' as nome_arquivo, SUBSTRING(content, 1, 200) as preview_conteudo FROM data_vectors_5bed5a54_76f3_4a10_bb16_176d8fecc104 LIMIT 5;",
-        "Listar todas as tabelas": "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND (table_name LIKE 'vectors_%' OR table_name LIKE 'data_vectors_%');",
-        "Ver estrutura da tabela": "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'data_vectors_5bed5a54_76f3_4a10_bb16_176d8fecc104';",
-    }
-    
-    # Query selector
-    selected_query = st.selectbox(
-        "Consultas pré-definidas:",
-        options=list(predefined_queries.keys())
-    )
-    
-    # Text area for SQL query
-    sql_query = st.text_area(
-        "Digite sua consulta SQL:",
-        predefined_queries[selected_query],
-        height=100
-    )
-    
-    # Execute button
-    if st.button("Executar Consulta"):
-        try:
-            from db_config import get_pg_connection
-            conn = get_pg_connection()
-            cursor = conn.cursor()
-            
-            # Execute the query
-            cursor.execute(sql_query)
-            
-            # Get the results
-            results = cursor.fetchall()
-            column_names = [desc[0] for desc in cursor.description]
-            
-            # Display the results
-            if results:
-                st.success(f"✅ Consulta executada com sucesso: {len(results)} registros encontrados")
+    with api_key_tab:
+        st.subheader("Verificação da API da OpenAI")
+        openai_api_key = os.getenv("OPENAI_API_KEY")
+        if openai_api_key:
+            # Check if key starts with "sk-"
+            if openai_api_key.startswith("sk-"):
+                # Mask the key
+                masked_key = f"sk-...{openai_api_key[-4:]}"
+                st.success(f"✅ Chave da API OpenAI configurada: {masked_key}")
                 
-                # Create a DataFrame for display
-                import pandas as pd
-                df = pd.DataFrame(results, columns=column_names)
-                st.dataframe(df)
-                
-                # Also show as raw text (useful for copying values)
-                st.code(str(results))
-            else:
-                st.info("A consulta foi executada, mas não retornou resultados.")
-            
-            cursor.close()
-            conn.close()
-        except Exception as e:
-            st.error(f"❌ Erro ao executar a consulta: {str(e)}")
-
-    # Add Direct Document Access Test
-    st.subheader("Teste de Acesso Direto a Documentos")
-    
-    # Only show if the multi-RAG tool is initialized
-    if 'multi_rag_tool' in st.session_state:
-        try:
-            # Get available documents
-            files_info = st.session_state.multi_rag_tool.get_files_in_database()
-            all_files = files_info["all_files"]
-            
-            if all_files:
-                # Document selector
-                selected_doc = st.selectbox(
-                    "Selecione um documento para testar:",
-                    options=sorted(all_files)
-                )
-                
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    # Verify document vectors button
-                    if st.button("Verificar Vetores do Documento"):
-                        with st.spinner(f"Verificando vetores para '{selected_doc}'..."):
-                            vector_info = st.session_state.multi_rag_tool.verify_document_vectors(selected_doc)
-                            
-                            if "error" in vector_info:
-                                st.error(f"Erro ao verificar vetores: {vector_info['error']}")
-                            else:
-                                st.success(f"✅ Verificação completa para '{selected_doc}'")
-                                
-                                # Display vector counts
-                                st.info(f"Total de vetores: {vector_info['total_vectors']}")
-                                
-                                # Display counts by table
-                                for table, count in vector_info['vector_counts'].items():
-                                    st.write(f"- **{table}**: {count} vetores")
-                                
-                                # Show sample content if available
-                                if any(samples for samples in vector_info['sample_contents'].values()):
-                                    with st.expander("Ver amostras de conteúdo"):
-                                        for table, samples in vector_info['sample_contents'].items():
-                                            if samples:
-                                                st.write(f"**Amostras da tabela {table}:**")
-                                                for sample in samples:
-                                                    st.code(sample['content_preview'], language="text")
-                
-                with col2:
-                    # Direct document summary button
-                    if st.button("Resumir Documento Diretamente"):
-                        with st.spinner(f"Gerando resumo para '{selected_doc}'..."):
-                            try:
-                                # Use our direct document summary method
-                                summary_result = st.session_state.multi_rag_tool.summarize_document(selected_doc)
-                                
-                                if "error" in summary_result:
-                                    st.error(f"Erro ao resumir documento: {summary_result['error']}")
-                                    st.warning(summary_result.get("message", ""))
-                                else:
-                                    st.success(f"✅ Resumo gerado para '{selected_doc}'")
-                                    
-                                    # Display the summary
-                                    st.markdown("### Resumo do Documento")
-                                    st.markdown(summary_result["answer"])
-                                    
-                                    # Show sources if available
-                                    if summary_result.get("sources"):
-                                        with st.expander(f"Ver fontes ({len(summary_result['sources'])} trechos)"):
-                                            for i, source in enumerate(summary_result["sources"]):
-                                                st.markdown(f"**Trecho {i+1}** ({source.get('file_name', 'unknown')})")
-                                                st.code(source.get('text', ''), language="text")
-                            except Exception as e:
-                                st.error(f"Erro ao resumir documento: {str(e)}")
-            else:
-                st.warning("⚠️ Nenhum documento encontrado na base de dados.")
-        except Exception as e:
-            st.error(f"Erro ao acessar documentos: {str(e)}")
-    else:
-        st.warning("⚠️ Ferramenta RAG não está inicializada. Navegue para a página 'Consulta com RAG' primeiro.")
-
-    # Add RAG Configuration Verification
-    st.subheader("Verificação da Configuração RAG")
-    
-    if 'multi_rag_tool' in st.session_state:
-        if st.button("Verificar Configuração do RAG"):
-            with st.spinner("Verificando configuração do RAG..."):
+                # Try a simple API call
                 try:
-                    config_results = st.session_state.multi_rag_tool.verify_configuration()
-                    
-                    # Display status
-                    if config_results["status"] == "ok":
-                        st.success("✅ Todas as verificações passaram com sucesso!")
-                    elif config_results["status"] == "warning":
-                        st.warning("⚠️ Avisos detectados na configuração")
-                    else:
-                        st.error("❌ Erros encontrados na configuração")
-                    
-                    # Display errors if any
-                    if config_results["errors"]:
-                        st.error("Problemas encontrados:")
-                        for error in config_results["errors"]:
-                            st.markdown(f"- {error}")
-                    
-                    # Display configuration details
-                    st.info("Detalhes da configuração:")
-                    st.json(config_results["details"])
+                    import openai
+                    response = openai.chat.completions.create(
+                        model="gpt-3.5-turbo",
+                        messages=[{"role": "user", "content": "Test connection"}],
+                        max_tokens=5
+                    )
+                    st.success("✅ Conexão com a API OpenAI testada com sucesso!")
                 except Exception as e:
-                    st.error(f"Erro durante a verificação: {str(e)}")
-    else:
-        st.warning("⚠️ Ferramenta RAG não está inicializada. Navegue para a página 'Consulta com RAG' primeiro.")
-
-    # Add Debug Document Summarization
-    st.subheader("Debug de Resumo de Documentos")
-    
-    if 'multi_rag_tool' in st.session_state:
-        st.info("Esta seção permite testar diretamente a funcionalidade de resumo de documentos. Útil para depuração quando os resumos via chat não funcionam corretamente.")
-        
-        # Get available documents
-        files_info = {}
-        try:
-            files_info = st.session_state.multi_rag_tool.get_files_in_database()
-            all_files = files_info["all_files"]
-            
-            if all_files:
-                # Document selector
-                selected_doc = st.selectbox(
-                    "Selecione um documento para resumir:",
-                    options=sorted(all_files)
-                )
-                
-                if st.button("Resumir Documento Selecionado"):
-                    with st.spinner(f"Gerando resumo para '{selected_doc}'..."):
-                        try:
-                            # Use our direct document summary method
-                            summary_result = st.session_state.multi_rag_tool.summarize_document(selected_doc)
-                            
-                            if "error" in summary_result:
-                                st.error(f"Erro ao resumir documento: {summary_result['error']}")
-                                st.warning(summary_result.get("message", ""))
-                            else:
-                                st.success(f"✅ Resumo gerado para '{selected_doc}'")
-                                
-                                # Display the summary
-                                st.markdown("### Resumo do Documento")
-                                st.markdown(summary_result["answer"])
-                                
-                                # Show sources if available
-                                if summary_result.get("sources"):
-                                    with st.expander(f"Ver fontes ({len(summary_result['sources'])} trechos)"):
-                                        for i, source in enumerate(summary_result["sources"]):
-                                            st.markdown(f"**Trecho {i+1}** ({source.get('file_name', 'unknown')})")
-                                            st.code(source.get('text', ''), language="text")
-                        except Exception as e:
-                            st.error(f"Erro ao resumir documento: {str(e)}")
+                    st.error(f"❌ Erro ao conectar à API OpenAI: {str(e)}")
             else:
-                st.warning("Nenhum documento encontrado na base de dados.")
+                st.warning("⚠️ A chave da API OpenAI não parece estar em formato válido (deve começar com 'sk-')")
+        else:
+            st.error("❌ A chave da API OpenAI não está configurada!")
+            st.info("Configure a variável de ambiente OPENAI_API_KEY ou adicione ao arquivo .env")
+    
+    with db_tab:
+        st.subheader("Diagnóstico do Banco de Dados")
+        
+        with st.spinner("Verificando conexão com PostgreSQL..."):
+            try:
+                from db_config import get_pg_connection
+                conn = get_pg_connection()
+                cursor = conn.cursor()
                 
-                # Provide diagnostic information
-                st.markdown("### Informações de Diagnóstico")
-                st.json(files_info)
+                # Check PostgreSQL version
+                cursor.execute("SELECT version();")
+                pg_version = cursor.fetchone()[0]
+                st.success(f"✅ Conexão PostgreSQL: {pg_version}")
                 
-                # Try to check database directly for documents
-                try:
-                    from db_config import get_pg_connection
-                    conn = get_pg_connection()
-                    cursor = conn.cursor()
+                # Check pgvector extension
+                cursor.execute("SELECT extname, extversion FROM pg_extension WHERE extname = 'vector';")
+                pgvector_info = cursor.fetchone()
+                
+                if pgvector_info:
+                    st.success(f"✅ Extensão pgvector instalada (versão {pgvector_info[1]})")
                     
-                    st.markdown("### Verificando Tabelas no Banco de Dados")
-                    # List vector tables
-                    cursor.execute("""
-                        SELECT table_name FROM information_schema.tables 
-                        WHERE table_schema = 'public' AND 
-                        (table_name LIKE 'vectors_%' OR table_name LIKE 'data_vectors_%')
-                    """)
+                    # Check if the extension is working correctly
+                    try:
+                        cursor.execute("SELECT '[1,2,3]'::vector <-> '[4,5,6]'::vector;")
+                        distance = cursor.fetchone()[0]
+                        st.success(f"✅ Operações vetoriais funcionando corretamente (distância teste: {distance:.4f})")
+                    except Exception as ve:
+                        st.error(f"❌ Erro ao testar operações vetoriais: {str(ve)}")
+                else:
+                    st.error("❌ Extensão pgvector NÃO está instalada!")
+                    st.info("A extensão 'pgvector' é necessária para operações de pesquisa vetorial.")
+                    st.code("CREATE EXTENSION vector;", language="sql")
+                
+                cursor.close()
+                conn.close()
+                
+            except Exception as e:
+                st.error(f"❌ Erro ao conectar ao banco de dados: {str(e)}")
+                
+    with vector_tab:
+        st.subheader("Tabelas Vetoriais")
+        
+        with st.spinner("Verificando tabelas vetoriais..."):
+            try:
+                # Initialize RAG tool if not already done
+                if 'multi_rag_tool' not in st.session_state:
+                    from app.multi_table_rag import MultiTableRAGTool
+                    try:
+                        st.session_state.multi_rag_tool = MultiTableRAGTool()
+                    except Exception as init_error:
+                        st.error(f"❌ Erro ao inicializar MultiTableRAGTool: {init_error}")
+                
+                # Display tables information
+                if hasattr(st.session_state, 'multi_rag_tool'):
+                    tables = st.session_state.multi_rag_tool.table_configs
                     
-                    tables = cursor.fetchall()
-                    if tables:
-                        st.success(f"Encontradas {len(tables)} tabelas de vetores:")
+                    if not tables:
+                        st.warning("⚠️ Nenhuma tabela vetorial encontrada no banco de dados.")
+                        st.info("Faça upload de documentos na seção 'Upload e Vetorização de Arquivos'.")
+                    else:
+                        st.success(f"✅ Encontradas {len(tables)} tabelas vetoriais")
                         
                         for table in tables:
-                            table_name = table[0]
-                            st.write(f"**Tabela:** {table_name}")
-                            
-                            # Get document counts
-                            cursor.execute(f"""
-                                SELECT COUNT(DISTINCT metadata_->>'file_name') 
-                                FROM {table_name}
-                                WHERE metadata_->>'file_name' IS NOT NULL
-                            """)
-                            
-                            count = cursor.fetchone()[0]
-                            st.write(f"Documentos distintos: {count}")
-                            
-                            # Get document names
-                            if count > 0:
-                                cursor.execute(f"""
-                                    SELECT DISTINCT metadata_->>'file_name' as file_name
-                                    FROM {table_name}
-                                    WHERE metadata_->>'file_name' IS NOT NULL
-                                """)
+                            with st.expander(f"Tabela: {table['name']}"):
+                                st.write(f"**Descrição**: {table['description']}")
+                                st.write(f"**Documentos**: {table.get('doc_count', '?')}")
+                                st.write(f"**Chunks**: {table.get('chunk_count', '?')}")
+                                st.write(f"**Dimensão dos vetores**: {table.get('embed_dim', 1536)}")
+                                st.write(f"**Pesquisa híbrida**: {'Habilitada' if table.get('hybrid_search', False) else 'Desabilitada'}")
                                 
-                                doc_names = cursor.fetchall()
-                                if doc_names:
-                                    st.write("Documentos encontrados:")
-                                    for doc in doc_names:
-                                        st.write(f"- {doc[0]}")
-                    else:
-                        st.warning("Nenhuma tabela de vetores encontrada no banco de dados.")
+                                if table.get('files'):
+                                    st.write("**Arquivos:**")
+                                    for file in table['files']:
+                                        st.write(f"- {file}")
+                
+                # Option to run a test query
+                if st.button("Executar consulta de teste"):
+                    test_query = "O que é RAG e como funciona?"
                     
-                    cursor.close()
-                    conn.close()
-                    
-                except Exception as e:
-                    st.error(f"Erro ao consultar diretamente o banco: {str(e)}")
-        except Exception as e:
-            st.error(f"Erro ao acessar informações de documentos: {str(e)}")
-    else:
-        st.warning("⚠️ Ferramenta RAG não está inicializada. Navegue para a página 'Consulta com RAG' primeiro.")
+                    with st.spinner(f"Executando consulta de teste: '{test_query}'"):
+                        try:
+                            response = st.session_state.multi_rag_tool.query(test_query)
+                            st.json(response)
+                        except Exception as qe:
+                            st.error(f"❌ Erro ao executar consulta de teste: {str(qe)}")
+                
+            except Exception as e:
+                st.error(f"❌ Erro ao verificar tabelas vetoriais: {str(e)}")

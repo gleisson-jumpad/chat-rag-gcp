@@ -1,7 +1,7 @@
 import os
 import logging
 from dotenv import load_dotenv
-from llama_index.core.vector_stores import VectorStoreQuery
+from llama_index.core.vector_stores import VectorStoreQuery, ExactMatchFilter, MetadataFilters
 from llama_index.embeddings.openai import OpenAIEmbedding
 from db_config import get_pg_connection # Import the connection function
 import json # For pretty printing JSON
@@ -204,6 +204,49 @@ def run_test_query():
         else:
             print("Ocorreu um erro ao executar a consulta SQL. Verifique os logs.")
         # ------------------------------------------
+
+        # --- Metadata Filter Retrieval Test ---
+        logger.info("\n--- Iniciando teste de recuperação por filtro de metadados --- ")
+        target_table_filter = "data_vectors_5286662f_dd5c_4d20_8a9c_f58d90669040" # The latest table name
+        target_file_filter = "llamaindex.pdf"
+
+        if target_table_filter in rag_tool.indexes:
+            logger.info(f"Testando recuperação via filtro na tabela: {target_table_filter}")
+            index = rag_tool.indexes[target_table_filter]
+            
+            # Create a retriever with a metadata filter
+            filters = MetadataFilters(
+                filters=[ExactMatchFilter(key="file_name", value=target_file_filter)]
+            )
+            retriever = index.as_retriever(
+                similarity_top_k=5, # Keep this reasonably high
+                filters=filters,
+                vector_store_query_mode="default" # Ensure we aren't forcing hybrid here
+            )
+            
+            # Retrieve nodes using the filter
+            # Use a simple query text, as the filter should dominate
+            logger.info(f"Executando retriever.retrieve para file_name='{target_file_filter}'")
+            try:
+                retrieved_nodes = retriever.retrieve("dummy query for filter") 
+            except Exception as retrieve_err:
+                 logger.error(f"Erro durante retriever.retrieve: {retrieve_err}")
+                 retrieved_nodes = []
+
+            print("\n--- Resultado da Recuperação por Filtro de Metadados --- ")
+            if retrieved_nodes:
+                print(f"Recuperação por filtro encontrou {len(retrieved_nodes)} nós.")
+                for i, node in enumerate(retrieved_nodes):
+                    print(f"Nó Filtrado {i+1}: Score={node.score}") # Score might be None for pure filter
+                    print(f"  Metadata: {node.metadata}")
+                    # Access text via node.text (VectorStoreIndex handles the column mapping internally now)
+                    print(f"  Conteúdo Preview: {node.text[:100]}...")
+            else:
+                print(f"Recuperação por filtro NÃO encontrou nós para file_name='{target_file_filter}'.")
+                logger.warning(f"Recuperação por filtro não retornou nós para {target_file_filter} na tabela {target_table_filter}")
+        else:
+            logger.warning(f"Índice para a tabela {target_table_filter} não encontrado para teste de filtro.")
+        # --- End Metadata Filter Retrieval Test ---
 
     except Exception as e:
         logger.error(f"Erro durante a execução do teste de consulta: {e}")
