@@ -321,10 +321,27 @@ def process_uploaded_file(file, session_id):
             
             logger.info(f"File saved to temporary location: {filepath}")
             
-            # Load documents using LlamaIndex
-            logger.info("Loading documents with SimpleDirectoryReader")
-            docs = SimpleDirectoryReader(input_files=[filepath]).load_data()
-            logger.info(f"Loaded {len(docs)} documents from file")
+            # Handle PDF files specially if it's a PDF
+            file_name = os.path.basename(filepath)
+            
+            # Create Documents from file with metadata
+            if filepath.lower().endswith('.pdf'):
+                # PDF Processing logic using SimpleDirectoryReader which can handle PDFs
+                logger.info(f"Processing PDF file: {file_name}")
+                docs = SimpleDirectoryReader(
+                    input_files=[filepath],
+                    filename_as_id=True
+                ).load_data()
+                logger.info(f"Loaded PDF with {len(docs)} chunks")
+            else:
+                # Regular file processing
+                docs = SimpleDirectoryReader(input_files=[filepath]).load_data()
+                logger.info(f"Loaded {len(docs)} documents from file")
+            
+            # Add metadata to all documents
+            for doc in docs:
+                doc.metadata["file_name"] = file_name
+                doc.metadata["source"] = filepath
             
             # Initialize RAG manager
             logger.info(f"Initializing PostgresRAGManager with session ID: {session_id}")
@@ -340,9 +357,37 @@ def process_uploaded_file(file, session_id):
             logger.info("Setting up vector store")
             rag_manager.setup_vector_store()
             
-            # Create index from documents
+            # Configure LlamaIndex settings
+            Settings.llm = OpenAI(model="gpt-4o", temperature=0.1)
+            Settings.embed_model = OpenAIEmbedding(model="text-embedding-ada-002", embed_batch_size=100)
+            
+            # Create node parser with smaller chunks for better retrieval
+            # Similar to the approach in pg_rag_simple.py
+            node_parser = SentenceSplitter(
+                chunk_size=512,  # Smaller chunks for more precise retrieval
+                chunk_overlap=50,  # Some overlap to maintain context
+            )
+            
+            # Parse documents into nodes
+            nodes = node_parser.get_nodes_from_documents(docs)
+            
+            # Ensure all nodes have the proper metadata for filtering
+            for i, node in enumerate(nodes):
+                node.metadata["doc_id"] = f"{file_name}_{i}"
+                node.metadata["file_name"] = file_name
+            
+            logger.info(f"Created {len(nodes)} nodes from document")
+            
+            # Create storage context
+            storage_context = StorageContext.from_defaults(vector_store=rag_manager.vector_store)
+            
+            # Create index from nodes
             logger.info("Creating index from documents")
-            index = rag_manager.create_index_from_documents(docs)
+            index = VectorStoreIndex(
+                nodes,
+                storage_context=storage_context,
+                show_progress=True
+            )
             
             logger.info(f"Successfully processed file {file.name}")
             return index
@@ -372,8 +417,14 @@ def get_existing_tables():
         logger.error(f"Error retrieving existing tables: {str(e)}", exc_info=True)
         return []
 
-def create_query_engine(model_id, table_name, similarity_top_k=3):
-    """Create a query engine for a specific table"""
+def create_query_engine(model_id, table_name, similarity_top_k=5):
+    """Create a query engine for a specific table
+    
+    This function aligns with pg_rag_simple.py's approach to:
+    1. Create a query engine with appropriate configuration
+    2. Set up similarity search with proper parameters
+    3. Support returning source attribution
+    """
     try:
         logger.info(f"Creating query engine for table: {table_name} with model: {model_id}")
         
@@ -395,7 +446,7 @@ def create_query_engine(model_id, table_name, similarity_top_k=3):
         
         # Create LLM
         logger.info(f"Initializing OpenAI LLM with model: {model_id}")
-        llm = OpenAI(model=model_id)
+        llm = OpenAI(model=model_id, temperature=0.1)
         
         # Create embedding model
         logger.info("Initializing OpenAI embedding model")
@@ -457,21 +508,13 @@ def create_query_engine(model_id, table_name, similarity_top_k=3):
             embed_model=embed_model
         )
         
-        # Configure query engine with performance parameters
+        # Configure query engine similar to pg_rag_simple.py
         logger.info(f"Creating QueryEngine with similarity_top_k={similarity_top_k}")
         query_engine = index.as_query_engine(
             llm=llm,
-            similarity_top_k=similarity_top_k,
-            vector_store_query_mode="hybrid",
-            alpha=0.5,  # Balance between semantic and keyword search
-            response_mode="compact"
+            similarity_top_k=similarity_top_k,  # Number of chunks to retrieve
+            response_mode="compact"  # Compact and useful response format
         )
-        
-        # Apply post-processors including similarity threshold
-        from llama_index.core.postprocessor import SimilarityPostprocessor
-        query_engine.retriever.node_postprocessors = [
-            SimilarityPostprocessor(similarity_cutoff=0.7)
-        ]
         
         logger.info(f"Successfully created query engine for {table_name}")
         return query_engine
@@ -479,3 +522,48 @@ def create_query_engine(model_id, table_name, similarity_top_k=3):
     except Exception as e:
         logger.error(f"Error creating query engine: {str(e)}", exc_info=True)
         raise
+
+def query_document(query_engine, query_text):
+    """
+    Query the document using vector similarity search
+    
+    Similar to pg_rag_simple.py, this function:
+    1. Converts the query to a vector embedding
+    2. Finds similar vectors in the database
+    3. Retrieves only the most relevant chunks (not the entire document)
+    4. Sends these chunks to the LLM for answer generation
+    
+    Args:
+        query_engine: Query engine to use
+        query_text (str): Query text
+        
+    Returns:
+        dict: Response with answer and source information
+    """
+    logger.info(f"Querying document with: {query_text}")
+    
+    try:
+        # Execute query
+        response = query_engine.query(query_text)
+        
+        # Get source nodes for context and attribution
+        sources = []
+        if hasattr(response, 'source_nodes'):
+            for i, node in enumerate(response.source_nodes):
+                source = {
+                    "text": node.node.get_content()[:150] + "..." if len(node.node.get_content()) > 150 else node.node.get_content(),
+                    "metadata": node.node.metadata,
+                    "score": float(node.score) if hasattr(node, "score") else None
+                }
+                sources.append(source)
+        
+        return {
+            "answer": str(response),
+            "sources": sources
+        }
+    except Exception as e:
+        logger.error(f"Error querying document: {str(e)}")
+        return {
+            "answer": f"Error querying document: {str(e)}",
+            "sources": []
+        }

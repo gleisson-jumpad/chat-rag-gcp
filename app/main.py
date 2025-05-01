@@ -169,7 +169,7 @@ elif menu == "🔍 Consulta com RAG":
         
     # Initialize multi-table RAG tool if not already done
     if 'multi_rag_tool' not in st.session_state:
-        from app.multi_table_rag import MultiTableRAGTool
+        from multi_table_rag import MultiTableRAGTool
         with st.spinner("Inicializando ferramenta RAG multi-tabela..."):
             try:
                 # Validate OpenAI API key first
@@ -284,7 +284,7 @@ elif menu == "🔍 Consulta com RAG":
                     """
                     
                     # Process the message with RAG integration
-                    from app.postgres_rag_tool import process_message_with_selective_rag
+                    from postgres_rag_tool import process_message_with_selective_rag
                     
                     response = process_message_with_selective_rag(
                         prompt, 
@@ -386,7 +386,7 @@ elif menu == "🧪 Diagnóstico Avançado":
             try:
                 # Initialize RAG tool if not already done
                 if 'multi_rag_tool' not in st.session_state:
-                    from app.multi_table_rag import MultiTableRAGTool
+                    from multi_table_rag import MultiTableRAGTool
                     try:
                         st.session_state.multi_rag_tool = MultiTableRAGTool()
                     except Exception as init_error:

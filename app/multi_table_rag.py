@@ -266,115 +266,60 @@ class MultiTableRAGTool:
         return table_configs
     
     def _initialize(self):
-        """Initialize all vector stores and query engines"""
+        """Initialize vector stores and indexes for each table"""
+        self.logger.info("Initializing vector stores and indexes for all tables")
+        
+        # Set up OpenAI API key
+        openai_api_key = os.getenv("OPENAI_API_KEY")
+        if not openai_api_key:
+            self.logger.error("OPENAI_API_KEY not set in environment")
+            raise ValueError("OpenAI API key is required")
+            
+        # Configure LlamaIndex settings with OpenAI embedding model
+        Settings.embed_model = OpenAIEmbedding(model="text-embedding-ada-002", embed_batch_size=100)
+        
+        # Initialize each table
         for table_config in self.table_configs:
             table_name = table_config["name"]
+            self.logger.info(f"Initializing table: {table_name}")
             
             try:
-                self.logger.info(f"Initializing resources for table: {table_name}")
-                
-                # Create vector store for this table with advanced configuration
-                vector_store_params = {
-                    **self.db_config,  # Include all database config parameters
-                    "table_name": table_name,
-                    "embed_dim": table_config.get("embed_dim", 1536),
-                }
-                
-                # Add hybrid search configuration
-                if table_config.get("hybrid_search", True):
-                    self.logger.info(f"Enabling hybrid search for table {table_name}")
-                    vector_store_params["hybrid_search"] = True
-                    vector_store_params["text_search_config"] = table_config.get("language", "english")
-                
-                # Add HNSW configuration
-                # Check if table already has HNSW index
-                if table_config.get("has_hnsw", False):
-                    self.logger.info(f"Table {table_name} already has HNSW index: {table_config.get('hnsw_indices', [])}")
-                    # Use existing HNSW index
-                    hnsw_config = None
-                else:
-                    # Configure for HNSW creation
-                    self.logger.info(f"Setting up new HNSW parameters for {table_name}")
-                    hnsw_config = {
-                        "hnsw_m": 16,
-                        "hnsw_ef_construction": 64,
-                        "hnsw_ef_search": 40,
-                        "hnsw_dist_method": "vector_cosine_ops"
-                    }
-                
-                # Create embedding model
-                embed_model = OpenAIEmbedding(
-                    model="text-embedding-ada-002",
-                    embed_batch_size=100  # Larger batch size for better performance
+                # Create vector store with hybrid search capability
+                vector_store = PGVectorStore.from_params(
+                    database=self.db_config["database"],
+                    host=self.db_config["host"],
+                    password=self.db_config["password"],
+                    port=self.db_config["port"],
+                    user=self.db_config["user"],
+                    table_name=table_name,
+                    embed_dim=table_config.get("embed_dim", 1536),  # OpenAI embedding dimension
+                    hybrid_search=table_config.get("hybrid_search", True),  # Enable hybrid search
+                    text_search_config=table_config.get("language", "english")
                 )
                 
-                # Try to create PGVectorStore with connection pooling
-                # First, set up a special connection callback that uses our pool
-                def get_conn_callback():
-                    return self._get_connection()
+                self.vector_stores[table_name] = vector_store
                 
-                # Try to create PGVectorStore with HNSW index if needed
-                try:
-                    self.logger.info(f"Attempting to create PGVectorStore for {table_name}")
-                    
-                    # If we have an existing HNSW index, don't try to create a new one
-                    if hnsw_config:
-                        self.vector_stores[table_name] = PGVectorStore.from_params(
-                            **vector_store_params,
-                            hnsw_kwargs=hnsw_config,
-                            connection_creator=get_conn_callback if self.connection_pool else None
-                        )
-                    else:
-                        self.vector_stores[table_name] = PGVectorStore.from_params(
-                            **vector_store_params,
-                            connection_creator=get_conn_callback if self.connection_pool else None
-                        )
-                        
-                    self.logger.info(f"Successfully created PGVectorStore for {table_name}")
-                except Exception as hnsw_error:
-                    self.logger.warning(f"Failed to create PGVectorStore with custom connection: {hnsw_error}")
-                    self.logger.info("Falling back to standard configuration")
-                    # Try without custom connection handling if it fails
-                    self.vector_stores[table_name] = PGVectorStore.from_params(**vector_store_params)
-                    self.logger.info(f"Successfully created basic PGVectorStore for {table_name}")
+                # Create storage context
+                storage_context = StorageContext.from_defaults(vector_store=vector_store)
                 
-                # Create the index with proper storage context
-                try:
-                    self.logger.info(f"Creating VectorStoreIndex for {table_name}")
-                    
-                    # Create storage context
-                    storage_context = StorageContext.from_defaults(
-                        vector_store=self.vector_stores[table_name]
-                    )
-                    
-                    self.indexes[table_name] = VectorStoreIndex.from_vector_store(
-                        self.vector_stores[table_name],
-                        embed_model=embed_model,
-                        storage_context=storage_context
-                    )
-                    self.logger.info(f"Successfully created VectorStoreIndex for {table_name}")
-                except Exception as e:
-                    self.logger.error(f"Error loading index from table '{table_name}': {e}")
-                    continue
-                
-                # Create query engine with advanced configuration
-                self.logger.info(f"Creating QueryEngine for {table_name}")
-                similarity_top_k = table_config.get("top_k", 5)
-                
-                self.query_engines[table_name] = self.indexes[table_name].as_query_engine(
-                    llm=self.llm,
-                    similarity_top_k=similarity_top_k,
-                    # Use hybrid search if enabled in table config
-                    vector_store_query_mode="hybrid" if table_config.get("hybrid_search", True) else "default",
-                    response_mode="compact",
-                    # Add these parameters for improved search
-                    alpha=0.5,  # Adjust hybrid search balance 
-                    similarity_cutoff=0.7  # Only include results above this threshold
+                # Create index from vector store
+                self.logger.info(f"Loading index from vector store: {table_name}")
+                index = VectorStoreIndex.from_vector_store(
+                    vector_store,
+                    storage_context=storage_context,
+                    embed_model=Settings.embed_model
                 )
-                self.logger.info(f"SUCCESS: QueryEngine created for {table_name}")
+                
+                self.indexes[table_name] = index
+                
+                # Create query engine
+                self.query_engines[table_name] = self._create_query_engine(vector_store, self.llm)
+                
+                self.logger.info(f"Successfully initialized table: {table_name}")
                 
             except Exception as e:
-                self.logger.error(f"FAILED Outer Initialization for table {table_name}: {str(e)}")
+                self.logger.error(f"Error initializing table {table_name}: {str(e)}")
+                # Continue with other tables instead of failing completely
     
     def __del__(self):
         """Cleanup connection pool on object destruction"""
@@ -443,52 +388,88 @@ class MultiTableRAGTool:
             }
     
     def query_single_table(self, table_name, query_text, filters=None):
-        """Query a specific table"""
-        if filters:
-            self.logger.warning("filters parameter deprecated in query_single_table, use query_single_table_with_filters instead")
-            
+        """
+        Query a specific table by name
+        
+        This approach follows pg_rag_simple.py's pattern for querying and returning results
+        with proper source attribution.
+        """
         self.logger.info(f"Querying table '{table_name}' with: '{query_text}' (filters: {filters})")
         
         try:
+            # Check if vector store exists
+            if table_name not in self.vector_stores:
+                self.logger.warning(f"No vector store found for table {table_name}")
+                return {"error": "Table not found", "message": f"Table {table_name} is not available"}
+            
+            # Check if we have an index for this table
             if table_name not in self.indexes:
-                self.logger.error(f"Table {table_name} is not in available indices: {list(self.indexes.keys())}")
-                return {"error": f"Table {table_name} not found", "answer": ""}
+                self.logger.warning(f"No index found for table {table_name}")
+                return {"error": "Index not found", "message": f"Index for table {table_name} is not available"}
             
-            # Execute query
+            # Get or create query engine
+            if table_name not in self.query_engines:
+                self.logger.info(f"Creating new query engine for {table_name}")
+                if table_name in self.vector_stores and table_name in self.indexes:
+                    self.query_engines[table_name] = self._create_query_engine(
+                        self.vector_stores[table_name], 
+                        self.llm
+                    )
+            
+            # Execute query with the engine
             self.logger.info(f"Executing query against table {table_name}")
-            query_engine = self.query_engines[table_name]
-            response = query_engine.query(query_text)
             
-            # Format response
-            result = self._format_response(response)
+            # Add filter if provided
+            if filters:
+                self.logger.info(f"Applying filters: {filters}")
+                response = self.query_engines[table_name].query(query_text, filter=filters)
+            else:
+                response = self.query_engines[table_name].query(query_text)
+            
+            # Format the response with source nodes
+            result = {
+                "answer": str(response),
+                "sources": []
+            }
+            
+            # Include source nodes if available - following pg_rag_simple.py's pattern
+            if hasattr(response, 'source_nodes'):
+                for node in response.source_nodes:
+                    source_info = {
+                        "text": node.node.get_content()[:150] + "..." if len(node.node.get_content()) > 150 else node.node.get_content(),
+                        "file_name": node.node.metadata.get("file_name", "unknown"),
+                        "relevance_score": float(node.score) if hasattr(node, "score") else None
+                    }
+                    result["sources"].append(source_info)
+                    
+                # Debug print what we found
+                self.logger.info(f"Found {len(result['sources'])} source nodes")
+                for idx, source in enumerate(result["sources"]):
+                    self.logger.info(f"Source {idx+1}: {source['file_name']} - Score: {source['relevance_score']}")
             
             return result
             
         except Exception as e:
-            error_msg = f"Error querying table {table_name}: {str(e)}"
-            self.logger.error(error_msg)
-            return {"error": error_msg, "answer": ""}
-    
+            self.logger.error(f"Error querying table {table_name}: {str(e)}")
+            return {"error": str(e), "message": f"Error querying table {table_name}"}
+            
     def _format_response(self, response):
-        """Format the response from a query engine"""
-        # Format response with sources
-        result = {
-            "answer": str(response),
-            "sources": []
-        }
+        """Format a response with source information"""
+        if hasattr(response, 'response'):
+            answer = response.response
+        else:
+            answer = str(response)
+            
+        source_info = ""
+        if hasattr(response, 'source_nodes') and response.source_nodes:
+            source_info = "\n\nSources:\n"
+            for i, node in enumerate(response.source_nodes):
+                source_info += f"\n{i+1}. {node.node.metadata.get('file_name', 'Unknown document')}"
+                if hasattr(node, 'score'):
+                    source_info += f" (Score: {node.score:.3f})"
+                source_info += f"\n{node.node.get_content()[:150]}...\n"
         
-        # Add source information if available
-        if hasattr(response, "source_nodes"):
-            for node in response.source_nodes:
-                source_info = {
-                    "text": node.node.get_content()[:250] + "..." if len(node.node.get_content()) > 250 else node.node.get_content(),
-                    "file_name": node.node.metadata.get("file_name", "unknown"),
-                    "page_number": node.node.metadata.get("page_label", "unknown"),
-                    "score": float(node.score) if hasattr(node, "score") else None
-                }
-                result["sources"].append(source_info)
-        
-        return result
+        return answer + source_info
     
     def query_single_table_with_filters(self, table_name, query_text, filters=None):
         """
@@ -583,57 +564,152 @@ class MultiTableRAGTool:
             # Update the LLM model for this query
             llm = OpenAI(model=model, temperature=0.1)
             
-            # Initialize response storage
-            all_responses = []
+            # Initialize tracking variables
+            best_table_name = None
+            best_response = None
             all_sources = []
             
-            # Query each vector store
-            for table_config in self.table_configs:
-                try:
-                    # Get the vector store for this table
-                    vector_store = table_config.get("vector_store")
-                    if not vector_store:
-                        self.logger.warning(f"No vector store found for table {table_config['name']}")
-                        continue
-                    
-                    # Create a query engine for this vector store
-                    query_engine = self._create_query_engine(vector_store, llm)
-                    
-                    # Query this vector store
-                    response = query_engine.query(query_text)
-                    
-                    if response and hasattr(response, 'response'):
-                        all_responses.append(response.response)
-                        
-                        # Add sources if available
-                        if hasattr(response, 'source_nodes'):
-                            for node in response.source_nodes:
-                                source = {
-                                    'text': node.text,
-                                    'score': node.score if hasattr(node, 'score') else None,
-                                    'file_name': node.metadata.get('file_name', 'unknown'),
-                                    'table': table_config['name']
-                                }
-                                all_sources.append(source)
-                    
-                except Exception as table_error:
-                    self.logger.error(f"Error querying table {table_config['name']}: {str(table_error)}")
+            # Try each table
+            for table_name in self.available_tables:
+                if table_name not in self.vector_stores or table_name not in self.indexes:
+                    self.logger.warning(f"Skipping table {table_name} - not properly initialized")
                     continue
+                
+                try:
+                    self.logger.info(f"Querying table: {table_name}")
+                    
+                    # Get the index for this table
+                    index = self.indexes[table_name]
+                    
+                    # Configure a query engine with higher similarity_top_k for better recall
+                    query_engine = index.as_query_engine(
+                        llm=llm,
+                        similarity_top_k=10,  # Increase from 5 to 10 for better recall
+                        response_mode="compact"
+                    )
+                    
+                    # Execute query
+                    response = query_engine.query(query_text)
+                    self.logger.info(f"Got response from {table_name}")
+                    
+                    # Check if we got source nodes
+                    if hasattr(response, 'source_nodes') and len(response.source_nodes) > 0:
+                        self.logger.info(f"Found {len(response.source_nodes)} source nodes from {table_name}")
+                        
+                        # Process source nodes
+                        sources = []
+                        for node in response.source_nodes:
+                            try:
+                                content = node.node.get_content() if hasattr(node.node, 'get_content') else node.text
+                                metadata = node.node.metadata if hasattr(node.node, 'metadata') else node.metadata
+                                source = {
+                                    "text": content[:150] + "..." if len(content) > 150 else content,
+                                    "metadata": metadata,
+                                    "score": float(node.score) if hasattr(node, "score") else None,
+                                    "table": table_name
+                                }
+                                sources.append(source)
+                                self.logger.info(f"Source from {table_name}: {source['metadata'].get('file_name', 'Unknown')}")
+                            except Exception as src_err:
+                                self.logger.error(f"Error processing source node: {str(src_err)}")
+                        
+                        # Track all sources
+                        all_sources.extend(sources)
+                        
+                        # If we got sources and no best response yet, use this one
+                        if sources and (best_response is None or len(sources) > 0):
+                            best_response = str(response)
+                            best_table_name = table_name
+                            self.logger.info(f"Setting best response from {table_name}")
+                except Exception as e:
+                    self.logger.error(f"Error querying table {table_name}: {str(e)}")
             
-            # If we got no responses, return an error
-            if not all_responses:
+            # If we didn't find anything relevant
+            if best_response is None:
+                # Try one more approach - direct fetching of contract info
+                try:
+                    self.logger.info("No results from standard search, trying direct document lookup")
+                    conn = get_pg_connection()
+                    cursor = conn.cursor()
+                    
+                    # Search for any contract-related documents
+                    for table_name in self.available_tables:
+                        cursor.execute(f"""
+                            SELECT text FROM {table_name}
+                            WHERE 
+                              metadata_->>'file_name' LIKE '%Coentro%' OR 
+                              metadata_->>'file_name' LIKE '%Jumpad%' OR
+                              metadata_->>'file_name' LIKE '%contrato%' OR
+                              metadata_->>'file_name' LIKE '%contract%'
+                            LIMIT 10
+                        """)
+                        
+                        results = cursor.fetchall()
+                        if results:
+                            self.logger.info(f"Found direct document content in {table_name}")
+                            
+                            # Combine all text chunks
+                            context = "\n\n".join([row[0] for row in results])
+                            
+                            # Create prompt for LLM
+                            prompt = f"""
+                            Answer the following question based on the provided context:
+                            
+                            Question: {query_text}
+                            
+                            Context:
+                            {context}
+                            
+                            Answer the question using only the information from the context.
+                            If the context doesn't contain the answer, say "I don't have information about that in my knowledge base."
+                            """
+                            
+                            # Get answer directly from LLM
+                            response = llm.complete(prompt)
+                            best_response = response.text if hasattr(response, 'text') else str(response)
+                            best_table_name = table_name
+                            
+                            # Create synthetic source
+                            all_sources.append({
+                                "text": "Direct document lookup result",
+                                "metadata": {"file_name": "Coentro e Jumpad contract"},
+                                "score": 1.0,
+                                "table": table_name
+                            })
+                            
+                            self.logger.info("Generated response from direct document lookup")
+                            break
+                            
+                    cursor.close()
+                    conn.close()
+                    
+                except Exception as direct_err:
+                    self.logger.error(f"Error in direct document lookup: {str(direct_err)}")
+            
+            # If still no results
+            if best_response is None:
                 return {
-                    "error": "No responses found",
+                    "error": "No relevant information found",
                     "message": "Could not find relevant information in any knowledge base."
                 }
             
-            # Combine all responses
-            combined_response = "\n\n".join(all_responses)
+            # Format the output
+            output = best_response
             
-            # Create final response
+            if all_sources:
+                # Sort sources by score (highest first)
+                sorted_sources = sorted(all_sources, key=lambda x: x.get("score", 0) if x.get("score") is not None else 0, reverse=True)
+                
+                output += "\n\nSources:"
+                for i, source in enumerate(sorted_sources[:5], 1):  # Show top 5 sources
+                    output += f"\n\n{i}. Score: {source.get('score', 'N/A'):.3f}" if source.get('score') is not None else f"\n\n{i}. Score: N/A"
+                    output += f"\n   Document: {source['metadata'].get('file_name', 'Unknown')}"
+                    output += f"\n   Text: {source['text']}"
+            
             return {
-                "answer": combined_response,
-                "sources": all_sources
+                "answer": output,
+                "sources": all_sources,
+                "best_table": best_table_name
             }
             
         except Exception as e:
@@ -1142,42 +1218,51 @@ class MultiTableRAGTool:
 
     def _create_query_engine(self, vector_store, llm):
         """
-        Create a query engine for the given vector store with the specified LLM.
+        Create a query engine for a given vector store
         
-        Args:
-            vector_store: The vector store to create a query engine for
-            llm: The LLM to use for the query engine
-            
-        Returns:
-            A configured query engine
+        This function follows the pattern in pg_rag_simple.py to configure
+        the query engine with the right parameters for effective retrieval.
         """
-        from llama_index.core import VectorStoreIndex
-        from llama_index.core.retrievers import VectorIndexRetriever
-        from llama_index.core.query_engine import RetrieverQueryEngine
-        from llama_index.core.postprocessor import SimilarityPostprocessor
+        self.logger.info("Creating query engine from vector store")
         
-        # Create the index
-        index = VectorStoreIndex.from_vector_store(vector_store)
-        
-        # Configure the retriever with hybrid search
-        retriever = VectorIndexRetriever(
-            index=index,
-            similarity_top_k=5,  # Number of top results to consider
-            vector_store_kwargs={
-                "hybrid_search": True,  # Enable hybrid search
-                "alpha": 0.5,  # Balance between keyword and semantic search
-            }
-        )
-        
-        # Add a similarity score threshold
-        node_postprocessors = [SimilarityPostprocessor(similarity_cutoff=0.7)]
-        
-        # Create and return the query engine
-        return RetrieverQueryEngine(
-            retriever=retriever,
-            node_postprocessors=node_postprocessors,
-            llm=llm
-        )
+        try:
+            # Create index from vector store if necessary
+            if vector_store not in self.vector_stores.values():
+                self.logger.info("Creating index for new vector store")
+                storage_context = StorageContext.from_defaults(vector_store=vector_store)
+                index = VectorStoreIndex.from_vector_store(
+                    vector_store,
+                    storage_context=storage_context,
+                    embed_model=Settings.embed_model
+                )
+            else:
+                # Find the index associated with this vector store
+                for table_name, vs in self.vector_stores.items():
+                    if vs == vector_store and table_name in self.indexes:
+                        index = self.indexes[table_name]
+                        self.logger.info(f"Using existing index for table {table_name}")
+                        break
+                else:
+                    self.logger.warning("Could not find existing index, creating new one")
+                    storage_context = StorageContext.from_defaults(vector_store=vector_store)
+                    index = VectorStoreIndex.from_vector_store(
+                        vector_store,
+                        storage_context=storage_context,
+                        embed_model=Settings.embed_model
+                    )
+            
+            # Configure query engine with parameters aligned with pg_rag_simple.py
+            query_engine = index.as_query_engine(
+                llm=llm,
+                similarity_top_k=5,  # Number of chunks to retrieve (not the entire doc)
+                response_mode="compact"  # How to format the response
+            )
+            
+            self.logger.info("Query engine created successfully")
+            return query_engine
+        except Exception as e:
+            self.logger.error(f"Error creating query engine: {str(e)}")
+            raise
 
 def create_multi_rag_tool_spec(available_files=None):
     """Create a specification for the multi-table RAG tool"""

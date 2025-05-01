@@ -1,3 +1,119 @@
+# Vector Search RAG Implementation
+
+This repository contains a Retrieval-Augmented Generation (RAG) implementation that uses PostgreSQL with pgvector for semantic search.
+
+## Overview
+
+The application uses LlamaIndex and OpenAI embeddings to build a robust RAG system with the following features:
+
+- Vector search using PostgreSQL with pgvector extension
+- Multi-table search capability to find information across various document collections
+- Hybrid search combining vector similarity and keyword matching
+- Fallback mechanisms to ensure reliable information retrieval
+- Direct document retrieval when vector search fails
+
+## Key Components
+
+- `multi_table_rag.py`: Core RAG implementation with vector search capabilities
+- `direct_query.py`: A simple standalone script for direct RAG queries
+- `test_rag.py`: Test script to verify RAG functionality
+- `db_config.py`: Database configuration utilities
+
+## Testing with test_rag.py
+
+The `test_rag.py` script is a critical diagnostic tool for verifying your RAG implementation. It performs the following functions:
+
+1. **Connection Verification**: Tests if the system can properly connect to the PostgreSQL database
+2. **Table Discovery**: Identifies available vector tables in the database
+3. **Document Discovery**: Lists all documents stored in the vector database
+4. **Query Testing**: Runs multiple pre-defined queries against the RAG system to test retrieval capabilities
+
+### Running the Test Script
+
+```bash
+python test_rag.py
+```
+
+### Sample Test Queries
+
+The script includes several test queries to evaluate different aspects of the RAG system:
+
+1. **Document Signatories**: "quem assinou o contrato entre Coentro e Jumpad?"
+2. **Payment Terms**: "what are the payment terms in the contract between Coentro and Jumpad?"
+3. **Signing Date**: "what was the signing date of the contract?"
+4. **General Terms**: "explain the general terms of the contract"
+
+### Output Format
+
+For each query, the script outputs:
+- The original query
+- The RAG system's answer
+- The best matching table that provided the information
+- The number of sources used in generating the answer
+
+### Interpreting Results
+
+- **Successful Results**: Should display coherent answers with relevant source information
+- **Failed Results**: Will report errors such as "No relevant information found" if the system cannot retrieve useful content
+
+### Usage Example
+
+This test script is invaluable when:
+- Setting up a new RAG deployment
+- Troubleshooting retrieval issues
+- Testing after database or document updates
+- Validating fallback mechanisms in the RAG pipeline
+
+## How It Works
+
+1. Documents are stored in PostgreSQL tables with vector embeddings
+2. Queries are converted to embeddings and used for similarity search
+3. Results are retrieved, ranked, and processed for relevance
+4. A language model (OpenAI) generates coherent responses using retrieved context
+5. Multiple fallback mechanisms ensure reliable information retrieval
+
+## Environment Variables
+
+The following environment variables should be set:
+
+- `OPENAI_API_KEY`: Your OpenAI API key
+- `DB_PUBLIC_IP`: PostgreSQL server IP
+- `PG_PORT`: PostgreSQL port (default: 5432)
+- `PG_USER`: PostgreSQL username
+- `PG_PASSWORD`: PostgreSQL password
+- `PG_DATABASE`: PostgreSQL database name
+
+## Example Usage
+
+```python
+from app.multi_table_rag import MultiTableRAGTool
+
+# Initialize the RAG tool
+rag_tool = MultiTableRAGTool()
+
+# Query the system
+result = rag_tool.query("Who signed the contract between Coentro and Jumpad?")
+
+# Print the result
+print(result["answer"])
+```
+
+## Troubleshooting
+
+If you encounter issues with the RAG system:
+
+1. Verify that the pgvector extension is properly installed in PostgreSQL
+2. Check that document vectors are correctly stored in the database
+3. Verify OpenAI API key and connection parameters
+4. Run the `test_rag.py` script to diagnose any issues
+
+## Dependencies
+
+- LlamaIndex
+- OpenAI
+- PostgreSQL with pgvector extension
+- psycopg2
+
 # RAG System with LlamaIndex and OpenAI
 
 This application implements a Retrieval-Augmented Generation (RAG) system using LlamaIndex with OpenAI integration, deployed on Google Cloud Run with PostgreSQL vector storage.

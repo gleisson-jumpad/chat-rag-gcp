@@ -225,7 +225,16 @@ class PostgresRAGTool:
                 raise
     
     def query(self, query_text, table_name=None):
-        """Query the knowledge base"""
+        """
+        Query the knowledge base using vector similarity search
+        
+        This approach aligns with pg_rag_simple.py by:
+        1. Converting the query to a vector embedding
+        2. Finding similar vectors in the database
+        3. Retrieving only the most relevant chunks
+        4. Generating an answer based on these chunks
+        5. Including source information for attribution
+        """
         self.logger.info(f"RAG query received: '{query_text}'")
         
         # If no specific table provided, use the first available table
@@ -261,7 +270,7 @@ class PostgresRAGTool:
             if hasattr(response, "source_nodes"):
                 for node in response.source_nodes:
                     source_info = {
-                        "text": node.node.get_content()[:250] + "..." if len(node.node.get_content()) > 250 else node.node.get_content(),
+                        "text": node.node.get_content()[:150] + "..." if len(node.node.get_content()) > 150 else node.node.get_content(),
                         "file_name": node.node.metadata.get("file_name", "unknown"),
                         "page_number": node.node.metadata.get("page_label", "unknown"),
                         "relevance_score": float(node.score) if hasattr(node, "score") else None
@@ -388,12 +397,51 @@ def process_message_with_selective_rag(user_message, rag_tool, model="gpt-4o"):
                 if doc_table:
                     logger.info(f"Found document in table: {doc_table}")
                     
-                    # Prepare a list of summary queries to retrieve comprehensive information
-                    summary_queries = [
-                        f"What are the main topics and key points in the document '{exact_match}'?",
-                        f"What is the overall structure and content of '{exact_match}'?",
-                        f"Provide a detailed summary of '{exact_match}' covering all important aspects."
-                    ]
+                    # HYBRID APPROACH: Use both vector search for relevant topics and direct retrieval for content
+                    
+                    # Step 1: Get document chunks directly from the database for comprehensive content
+                    from db_config import get_pg_connection
+                    conn = get_pg_connection()
+                    cursor = conn.cursor()
+                    
+                    logger.info(f"Direct DB retrieval: Getting chunks for document {exact_match}")
+                    cursor.execute(f"""
+                        SELECT text, metadata_->>'page_label' as page
+                        FROM {doc_table} 
+                        WHERE metadata_->>'file_name' = %s
+                        ORDER BY id
+                    """, (exact_match,))
+                    
+                    rows = cursor.fetchall()
+                    cursor.close()
+                    conn.close()
+                    
+                    document_chunks = []
+                    if rows:
+                        logger.info(f"Found {len(rows)} chunks directly from the database")
+                        
+                        # Arrange chunks by page number if available
+                        chunks_by_page = {}
+                        for text, page in rows:
+                            if page not in chunks_by_page:
+                                chunks_by_page[page] = []
+                            chunks_by_page[page].append(text)
+                        
+                        # Get sorted pages
+                        sorted_pages = sorted(chunks_by_page.keys(), key=lambda p: int(p) if p and p.isdigit() else 0)
+                        
+                        # Combine all text in order
+                        for page in sorted_pages:
+                            page_text = "\n\n".join(chunks_by_page[page])
+                            document_chunks.append(f"[Page {page}] {page_text}")
+                        
+                        document_text = "\n\n".join(document_chunks)
+                        logger.info(f"Combined document text length: {len(document_text)}")
+                    else:
+                        logger.warning(f"No chunks found directly for document {exact_match}")
+                    
+                    # Step 2: Use vector search to find the most relevant segments and main topics
+                    vector_responses = []
                     
                     # Get the index for this table
                     index = None
@@ -408,70 +456,88 @@ def process_message_with_selective_rag(user_message, rag_tool, model="gpt-4o"):
                         # Create LLM
                         llm = OpenAI(model=model)
                         
+                        # Prepare a list of summary queries to retrieve comprehensive information
+                        summary_queries = [
+                            f"What are the main topics and key points in the document '{exact_match}'?",
+                            f"What is the overall structure and content of '{exact_match}'?",
+                            f"Provide a detailed summary of '{exact_match}' covering all important aspects."
+                        ]
+                        
                         # Create a custom query engine with higher top_k and metadata filters
-                        query_engine = index.as_query_engine(
-                            llm=llm,
-                            similarity_top_k=15,  # Higher k value for better document coverage
-                            response_mode="tree_summarize",  # Use tree_summarize for better summaries of longer texts
-                            filters=filters  # Apply the file_name filter
-                        )
-                        
-                        # Run multiple queries to get comprehensive coverage
-                        all_responses = []
-                        for query in summary_queries:
-                            logger.info(f"Running vector query: {query}")
-                            response = query_engine.query(query)
-                            if response and hasattr(response, 'response'):
-                                all_responses.append(response.response)
-                        
-                        # Create a synthesized summary from all responses
-                        if all_responses:
-                            combined_response = "\n\n".join(all_responses)
-                            
-                            # Final synthesis step
-                            client = DirectOpenAI(api_key=openai_api_key)
-                            synthesis_prompt = f"""
-                            Create a comprehensive, well-structured summary of the document '{exact_match}' 
-                            based on the following extracted information:
-                            
-                            {combined_response}
-                            
-                            Your summary should:
-                            1. Cover all major topics and key points
-                            2. Be well-organized with sections and subpoints where appropriate
-                            3. Present information in a logical flow
-                            4. Include any important details or conclusions from the document
-                            """
-                            
-                            logger.info("Generating final synthesized summary")
-                            final_response = client.chat.completions.create(
-                                model=model,
-                                messages=[
-                                    {"role": "system", "content": "You are a helpful assistant that creates clear, comprehensive document summaries."},
-                                    {"role": "user", "content": synthesis_prompt}
-                                ]
+                        try:
+                            query_engine = index.as_query_engine(
+                                llm=llm,
+                                similarity_top_k=15,  # Higher k value for better document coverage
+                                response_mode="tree_summarize",  # Use tree_summarize for better summaries of longer texts
+                                filters=filters  # Apply the file_name filter
                             )
                             
-                            summary = final_response.choices[0].message.content
-                            logger.info(f"Successfully generated synthesized summary of length {len(summary)}")
-                            
-                            return summary
-                
-                # If we get here, the vector search approach didn't work
-                logger.warning("Vector search approach didn't produce results, trying direct method")
-                
-                # Try the document method from MultiTableRAGTool if available
-                if hasattr(rag_tool, 'summarize_document'):
-                    logger.info("Using rag_tool.summarize_document method")
-                    result = rag_tool.summarize_document(exact_match)
-                    if result and "answer" in result:
-                        return result["answer"]
-                
+                            # Run multiple queries to get comprehensive coverage
+                            for query in summary_queries:
+                                logger.info(f"Running vector query: {query}")
+                                response = query_engine.query(query)
+                                if response and hasattr(response, 'response'):
+                                    vector_responses.append(f"Vector Search Result: {response.response}")
+                        except Exception as ve:
+                            logger.error(f"Error during vector query: {ve}")
+                    
+                    # Step 3: Generate the summary using both vector search results and direct document content
+                    client = DirectOpenAI(api_key=openai_api_key)
+                    
+                    # Combine vector search results with direct document content
+                    if vector_responses:
+                        logger.info(f"Got {len(vector_responses)} vector search responses")
+                        vector_content = "\n\n".join(vector_responses)
+                    else:
+                        vector_content = "No additional information from vector search available."
+                    
+                    if document_chunks:
+                        if len(document_text) > 90000:  # If document is too large, only use the first 90K chars
+                            document_text = document_text[:90000] + "... [truncated]"
+                            logger.info(f"Document text truncated to 90000 characters")
+                    else:
+                        document_text = "No direct document content available."
+                    
+                    # Create synthesis prompt
+                    synthesis_prompt = f"""
+                    You are tasked with creating a comprehensive summary of the document '{exact_match}'.
+                    
+                    I am providing you with two sources of information:
+                    
+                    1. DIRECT DOCUMENT CONTENT:
+                    {document_text}
+                    
+                    2. VECTOR SEARCH INSIGHTS (main topics and structure):
+                    {vector_content}
+                    
+                    Please create a well-structured, comprehensive summary that:
+                    1. Covers all major topics and key points from the document
+                    2. Organizes information into logical sections with headings
+                    3. Presents content in a clear, readable format
+                    4. Highlights the most important details and conclusions
+                    
+                    Your summary should read as a cohesive document that accurately reflects the original content.
+                    """
+                    
+                    logger.info("Generating final synthesized summary")
+                    response = client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": "You are a helpful assistant that creates clear, comprehensive document summaries."},
+                            {"role": "user", "content": synthesis_prompt}
+                        ]
+                    )
+                    
+                    summary = response.choices[0].message.content
+                    logger.info(f"Successfully generated synthesized summary of length {len(summary)}")
+                    
+                    return summary
+            
             except Exception as e:
-                logger.error(f"Error during vector search summary: {e}")
+                logger.error(f"Error during hybrid document summary approach: {e}")
                 logger.info("Falling back to direct approach")
             
-            # DIRECT APPROACH as fallback (only if vector search fails)
+            # DIRECT APPROACH as fallback (only if hybrid approach fails)
             try:
                 # Extract document content directly from the database
                 from db_config import get_pg_connection
@@ -585,40 +651,80 @@ def process_message_with_selective_rag(user_message, rag_tool, model="gpt-4o"):
                 # Query RAG with the user message - handle different tool types
                 logger.info(f"Querying RAG system with table: {table_to_use}")
                 
-                # Detect which type of tool we're using
-                if hasattr(rag_tool, 'query_single_table'):
-                    # This is likely a MultiTableRAGTool
-                    logger.info("Using MultiTableRAGTool.query_single_table")
-                    rag_result = rag_tool.query_single_table(table_to_use, user_message)
-                else:
-                    # This is the older PostgresRAGTool
-                    logger.info("Using PostgresRAGTool.query")
-                    rag_result = rag_tool.query(user_message, table_to_use)
+                # Perform RAG query and get response with sources
+                try:
+                    # Query processing similar to pg_rag_simple.py
+                    if hasattr(rag_tool, 'query_single_table'):
+                        # Using MultiTableRAGTool
+                        rag_result = rag_tool.query_single_table(table_to_use, user_message)
+                    else:
+                        # Using PostgresRAGTool
+                        rag_result = rag_tool.query(user_message, table_to_use)
+                    
+                    # Check for errors in the result
+                    if "error" in rag_result:
+                        logger.error(f"Error querying RAG: {rag_result['error']}")
+                        return f"I encountered an error while searching the knowledge base: {rag_result['error']}"
+                    
+                    # Format sources for better readability, similar to pg_rag_simple.py
+                    sources_text = ""
+                    if "sources" in rag_result and rag_result["sources"]:
+                        sources_text = "\n\nSources:\n"
+                        for i, source in enumerate(rag_result["sources"], 1):
+                            score = source.get("relevance_score", 0)
+                            if score:
+                                score_str = f"Score: {score:.3f}"
+                            else:
+                                score_str = "No score available"
+                                
+                            file_name = source.get("file_name", "Unknown")
+                            text_snippet = source.get("text", "")
+                            
+                            sources_text += f"\n{i}. {score_str}\n   Document: {file_name}\n   Text: {text_snippet}\n"
+                    
+                    # Create a response with attribution similar to the pg_rag_simple.py approach
+                    answer = rag_result["answer"]
+                    
+                    # Debug print to stdout to help diagnose issues
+                    print(f"DEBUG: Found answer: {answer[:100]}...")
+                    print(f"DEBUG: Found {len(rag_result.get('sources', []))} sources")
+                    
+                    # Return the answer with source information, even if no sources found
+                    formatted_response = answer
+                    if sources_text:
+                        formatted_response += sources_text
+                        
+                    # Don't return empty responses
+                    if not formatted_response or formatted_response.strip() == "":
+                        # Try to get direct database content if formatter fails
+                        conn = None
+                        try:
+                            # Find the table containing this document
+                            doc_table = tables[0] if tables else None
+                            if doc_table:
+                                conn = get_pg_connection()
+                                cursor = conn.cursor()
+                                # Get content directly
+                                cursor.execute(f"""
+                                    SELECT text FROM {doc_table} 
+                                    ORDER BY id LIMIT 5
+                                """)
+                                chunks = [row[0] for row in cursor.fetchall()]
+                                if chunks:
+                                    return f"Based on the available documents, here's what I found:\n\n{chunks[0]}\n\n(This is a fallback response as normal processing failed.)"
+                        except Exception as e:
+                            print(f"DEBUG: Fallback retrieval error: {e}")
+                        finally:
+                            if conn:
+                                conn.close()
+                                
+                        return "I cannot find any information about this in the documents. Please try a different query."
+                    
+                    return formatted_response
                 
-                if "error" in rag_result:
-                    logger.error(f"Error querying RAG: {rag_result['error']}")
-                    return f"I attempted to search the knowledge base but encountered an error: {rag_result['error']}"
-                
-                # Create a prompt that integrates the RAG response
-                final_prompt_messages = [
-                    {"role": "system", "content": 
-                     "You are a helpful assistant. Answer the user's question based on your knowledge and the provided RAG results."},
-                    {"role": "user", "content": user_message},
-                    {"role": "system", "content": 
-                     f"RAG RESULTS: {rag_result['answer']}\n\n" +
-                     f"SOURCES: {json.dumps(rag_result['sources'], indent=2)}\n\n" +
-                     "Use the RAG results to enrich your response, but maintain a natural, direct style. " +
-                     "Only mention the sources if they're particularly relevant or if the user asks for references."}
-                ]
-                
-                # Get the final response
-                logger.info("Generating final response using RAG results")
-                final_response = openai.chat.completions.create(
-                    model=model,
-                    messages=final_prompt_messages
-                )
-                
-                return final_response.choices[0].message.content
+                except Exception as query_error:
+                    logger.error(f"Error during RAG query: {str(query_error)}")
+                    return f"I encountered an error while processing your query: {str(query_error)}"
             else:
                 logger.warning("No table available for RAG, falling back to normal response")
                 # Fall through to non-RAG response
@@ -642,4 +748,4 @@ def process_message_with_selective_rag(user_message, rag_tool, model="gpt-4o"):
         
     except Exception as e:
         logger.error(f"Error in process_message_with_selective_rag: {str(e)}")
-        return f"An error occurred: {str(e)}" 
+        return f"I encountered an error while processing your message: {str(e)}" 
