@@ -64,6 +64,59 @@ This test script is invaluable when:
 - Testing after database or document updates
 - Validating fallback mechanisms in the RAG pipeline
 
+### Detailed Example: Diagnosing RAG Issues
+
+Below is an example workflow for diagnosing issues with your RAG implementation:
+
+1. **Run the test script to get baseline diagnostics**:
+   ```bash
+   python test_rag.py
+   ```
+
+2. **Check for database connectivity**:
+   The test script will first verify your database connection and report details like:
+   ```
+   ✅ Database connection successful!
+   PostgreSQL version: PostgreSQL 15.12
+   pgvector extension: Installed
+   pgvector version: 0.8.0
+   Vector tables found: 2
+   ```
+
+3. **Examine document and table details**:
+   The script will list all tables and documents found:
+   ```
+   Found 2 vector tables
+     Table 1: data_vectors_472971c1_4265_4aba_a6cf_c3b633115fe1
+       Description: Contains 1 documents: llamaindex.pdf
+       Documents: 1
+       Chunks: 14
+       HNSW Index: Yes
+   ```
+
+4. **Review query results**:
+   For each test query, examine the response quality. Successful queries will show:
+   ```
+   ✅ Query successful!
+   Retrieved from table: data_vectors_cdc82293_1cb1_4986_806b_4f57459e57e3
+   Sources used: 1
+   Source documents: Coentro e Jumpad contract
+   ```
+
+5. **Check the log file for detailed diagnostics**:
+   The script saves all logs to `test_rag_results.log` for more detailed review:
+   ```bash
+   cat test_rag_results.log
+   ```
+
+6. **Troubleshooting common issues**:
+   - If database connection fails, check your environment variables
+   - If no documents are found, ensure documents are properly indexed
+   - If queries return no results, check that your RAG pipeline is configured correctly
+   - If results lack source attribution, verify that metadata is properly stored
+
+By using this script regularly, you can maintain confidence in your RAG system's functionality and quickly diagnose any issues that arise.
+
 ## How It Works
 
 1. Documents are stored in PostgreSQL tables with vector embeddings
