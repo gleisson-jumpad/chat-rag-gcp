@@ -16,12 +16,13 @@ The application uses LlamaIndex and OpenAI embeddings to build a robust RAG syst
 
 - `multi_table_rag.py`: Core RAG implementation with vector search capabilities
 - `direct_query.py`: A simple standalone script for direct RAG queries
-- `test_rag.py`: Test script to verify RAG functionality
+- `Tests/test_rag.py`: Test script to verify RAG functionality
+- `Tests/test_vector_search.py`: Performance benchmark for vector search functionality
 - `db_config.py`: Database configuration utilities
 
 ## Testing with test_rag.py
 
-The `test_rag.py` script is a critical diagnostic tool for verifying your RAG implementation. It performs the following functions:
+The `Tests/test_rag.py` script is a critical diagnostic tool for verifying your RAG implementation. It performs the following functions:
 
 1. **Connection Verification**: Tests if the system can properly connect to the PostgreSQL database
 2. **Table Discovery**: Identifies available vector tables in the database
@@ -31,7 +32,7 @@ The `test_rag.py` script is a critical diagnostic tool for verifying your RAG im
 ### Running the Test Script
 
 ```bash
-python test_rag.py
+python Tests/test_rag.py
 ```
 
 ### Sample Test Queries
@@ -70,7 +71,7 @@ Below is an example workflow for diagnosing issues with your RAG implementation:
 
 1. **Run the test script to get baseline diagnostics**:
    ```bash
-   python test_rag.py
+   python Tests/test_rag.py
    ```
 
 2. **Check for database connectivity**:
@@ -117,6 +118,56 @@ Below is an example workflow for diagnosing issues with your RAG implementation:
 
 By using this script regularly, you can maintain confidence in your RAG system's functionality and quickly diagnose any issues that arise.
 
+## Benchmarking with test_vector_search.py
+
+The `Tests/test_vector_search.py` script is a comprehensive benchmarking tool that evaluates the quality and performance of the vector search capabilities within the RAG system. This script is particularly valuable for:
+
+1. **Performance Evaluation**: Measures query execution time and response latency
+2. **Retrieval Quality Assessment**: Tests the system's ability to find relevant information across documents
+3. **Multi-domain Testing**: Evaluates both document-specific queries and general knowledge questions
+4. **Source Relevance Analysis**: Reports on the relevance scores of retrieved sources
+
+### Running the Benchmark Script
+
+```bash
+python Tests/test_vector_search.py
+```
+
+### Benchmark Query Types
+
+The script tests the vector search system with two categories of queries:
+
+1. **Document-specific Queries**:
+   - Contract value inquiries
+   - Document signatory identification
+   - Date and duration information
+   - These validate the system's ability to retrieve precise factual information
+
+2. **Conceptual Knowledge Queries**:
+   - Technical explanations about RAG systems
+   - LlamaIndex and OpenAI integration details
+   - Vector search implementation concepts
+   - These test broader knowledge retrieval capabilities
+
+### Output Metrics
+
+For each test query, the script reports:
+- Query execution time in seconds
+- Table that provided the best matching results
+- Full response text
+- Source documents used with their relevance scores
+
+### Usage Benefits
+
+This benchmarking tool is invaluable when:
+- Optimizing vector database configuration
+- Evaluating search performance after adding new documents
+- Testing system behavior with different query formulations
+- Comparing the effectiveness of different indexing strategies
+- Troubleshooting specific retrieval failures
+
+By running this script regularly, you can track and improve your RAG system's search quality over time.
+
 ## How It Works
 
 1. Documents are stored in PostgreSQL tables with vector embeddings
@@ -158,7 +209,7 @@ If you encounter issues with the RAG system:
 1. Verify that the pgvector extension is properly installed in PostgreSQL
 2. Check that document vectors are correctly stored in the database
 3. Verify OpenAI API key and connection parameters
-4. Run the `test_rag.py` script to diagnose any issues
+4. Run the `Tests/test_rag.py` script to diagnose any issues
 
 ## Dependencies
 
