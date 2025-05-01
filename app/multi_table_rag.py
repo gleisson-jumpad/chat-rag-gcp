@@ -591,11 +591,7 @@ class MultiTableRAGTool:
                         conn = get_pg_connection()
                         cursor = conn.cursor()
                         
-                        # Check if we need to look for contract signatories as well
-                        contract_signatories_keywords = ["assinou", "assinado", "assinaram", "assinaturas", "signatário", "signatários"]
-                        needs_signatories = any(keyword in query_text.lower() for keyword in contract_signatories_keywords)
-                        
-                        # Search conditions based on query needs
+                        # Search conditions for financial information
                         search_conditions = """
                             text ILIKE '%valor%' OR 
                             text ILIKE '%R$%' OR 
@@ -603,20 +599,6 @@ class MultiTableRAGTool:
                             text ILIKE '%pagamento%' OR
                             text ILIKE '%mensalidade%'
                         """
-                        
-                        # Add signatory search conditions if needed
-                        if needs_signatories:
-                            self.logger.info(f"Also searching for contract signatories")
-                            signatory_conditions = """
-                            OR text ILIKE '%assinou%' OR
-                            text ILIKE '%assinado%' OR
-                            text ILIKE '%assina%' OR
-                            text ILIKE '%representada%' OR
-                            text ILIKE '%CPF%' OR
-                            text ILIKE '%CNPJ%' OR
-                            text ILIKE '%testemunha%'
-                            """
-                            search_conditions += signatory_conditions
                         
                         # Search for contract information
                         cursor.execute(f"""
@@ -642,11 +624,15 @@ class MultiTableRAGTool:
                             Context:
                             {context}
                             
-                            Answer the question using only information from the context. Use the exact values mentioned in the document.
+                            Answer the question using only information from the context. Use the exact values, names, and dates mentioned in the document.
                             If the information is not clearly stated in the context, indicate that it might not be available.
                             
-                            For contract values, specify the exact amounts. For signing parties, mention names, roles, and companies.
+                            For contract values, specify the exact amounts. 
+                            For signing parties, mention full names, roles, and companies.
                             For signing dates, provide the precise date if available.
+                            
+                            Look carefully for lines like "Assinou como contratada em" or "Assinou como contratante em" as these indicate who signed and when.
+                            Also look for emails associated with signatories.
                             """
                             
                             # Get answer from LLM
@@ -679,8 +665,9 @@ class MultiTableRAGTool:
                     # Configure a query engine with higher similarity_top_k for better recall
                     query_engine = index.as_query_engine(
                         llm=llm,
-                        similarity_top_k=10,  # Increase from 5 to 10 for better recall
-                        response_mode="compact"
+                        similarity_top_k=15,  # Increase from 10 to 15 for better recall
+                        response_mode="compact",
+                        use_hybrid_search=True  # Always use hybrid search for better results
                     )
                     
                     # Execute query
@@ -1349,8 +1336,9 @@ class MultiTableRAGTool:
             # Configure query engine with parameters aligned with pg_rag_simple.py
             query_engine = index.as_query_engine(
                 llm=llm,
-                similarity_top_k=5,  # Number of chunks to retrieve (not the entire doc)
-                response_mode="compact"  # How to format the response
+                similarity_top_k=10,  # Increased from 5 to retrieve more chunks
+                response_mode="compact",  # How to format the response
+                use_hybrid_search=True    # Use hybrid search for better results
             )
             
             self.logger.info("Query engine created successfully")
