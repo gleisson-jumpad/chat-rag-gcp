@@ -708,67 +708,161 @@ class MultiTableRAGTool:
             
             # If we didn't find anything relevant
             if best_response is None:
-                # Try one more approach - direct fetching of contract info
+                # Try one more approach - direct document lookup
                 try:
                     self.logger.info("No results from standard search, trying direct document lookup")
                     conn = get_pg_connection()
                     cursor = conn.cursor()
                     
-                    # Search for any contract-related documents
+                    # Extract keywords from the query
+                    query_words = query_text.lower().split()
+                    # Filter out common stop words
+                    stop_words = ["a", "an", "the", "is", "are", "was", "were", "and", "or", "but", "in", "on", "at", "to", "for", "with", "about", "what", "how", "when", "where", "who", "which", "why", "do", "does", "did"]
+                    keywords = [word for word in query_words if word not in stop_words and len(word) > 2]
+                    
+                    if not keywords:
+                        keywords = query_words  # Use all words if no meaningful keywords found
+                    
+                    self.logger.info(f"Extracted keywords for lookup: {keywords}")
+                    
+                    # Search in all tables using keywords
+                    found_content = False
+                    all_chunks = []
+                    
                     for table_name in self.available_tables:
-                        cursor.execute(f"""
-                            SELECT text FROM {table_name}
-                            WHERE 
-                              metadata_->>'file_name' LIKE '%Coentro%' OR 
-                              metadata_->>'file_name' LIKE '%Jumpad%' OR
-                              metadata_->>'file_name' LIKE '%contrato%' OR
-                              metadata_->>'file_name' LIKE '%contract%'
-                            LIMIT 10
-                        """)
+                        # Try two search approaches
                         
-                        results = cursor.fetchall()
-                        if results:
-                            self.logger.info(f"Found direct document content in {table_name}")
-                            
-                            # Combine all text chunks
-                            context = "\n\n".join([row[0] for row in results])
-                            
-                            # Create prompt for LLM
-                            prompt = f"""
-                            Answer the following question based on the provided context:
-                            
-                            Question: {query_text}
-                            
-                            Context:
-                            {context}
-                            
-                            Answer the question using only the information from the context.
-                            If the context doesn't contain the answer, say "I don't have information about that in my knowledge base."
+                        # 1. First approach: Keyword-based search
+                        search_conditions = []
+                        for keyword in keywords:
+                            if len(keyword) > 3:  # Use only meaningful keywords
+                                search_conditions.append(f"text ILIKE '%{keyword}%'")
+                        
+                        if search_conditions:
+                            search_query = f"""
+                                SELECT text, metadata_->>'file_name' as filename
+                                FROM {table_name} 
+                                WHERE {' OR '.join(search_conditions)}
+                                LIMIT 8
                             """
                             
-                            # Get answer directly from LLM
-                            response = llm.complete(prompt)
-                            best_response = response.text if hasattr(response, 'text') else str(response)
-                            best_table_name = table_name
+                            try:
+                                cursor.execute(search_query)
+                                rows = cursor.fetchall()
+                                
+                                if rows:
+                                    found_content = True
+                                    self.logger.info(f"Found {len(rows)} relevant chunks in {table_name} with keyword search")
+                                    
+                                    for text, filename in rows:
+                                        all_chunks.append({
+                                            "text": text,
+                                            "filename": filename,
+                                            "table": table_name
+                                        })
+                            except Exception as e:
+                                self.logger.error(f"Error searching table {table_name} with keywords: {str(e)}")
+                        
+                        # 2. Second approach: Document pattern matching
+                        # This is helpful for contract queries where keywords might not match exactly
+                        keyword_rows_count = 0
+                        try:
+                            # Look for file patterns that might be relevant
+                            contract_terms = ["contract", "agreement", "legal", "terms"]
+                            is_contract_query = any(term in query_text.lower() for term in contract_terms)
                             
-                            # Create synthetic source
-                            all_sources.append({
-                                "text": "Direct document lookup result",
-                                "metadata": {"file_name": "Coentro e Jumpad contract"},
-                                "score": 1.0,
-                                "table": table_name
-                            })
+                            document_patterns = []
+                            if is_contract_query:
+                                document_patterns = ["%contract%", "%agreement%", "%coentro%", "%jumpad%"]
+                            else:
+                                # For technical queries
+                                tech_terms = ["llamaindex", "llama", "openai", "vector", "api", "rag", "retrieval"]
+                                if any(term in query_text.lower() for term in tech_terms):
+                                    document_patterns = ["%llama%", "%index%", "%embed%", "%rag%", "%retrieval%"]
                             
-                            self.logger.info("Generated response from direct document lookup")
-                            break
-                            
+                            if document_patterns and (len(all_chunks) < 3):  # Only do pattern matching if we don't have enough chunks yet
+                                doc_conditions = " OR ".join([f"metadata_->>'file_name' ILIKE '{pattern}'" for pattern in document_patterns])
+                                document_query = f"""
+                                    SELECT text, metadata_->>'file_name' as filename
+                                    FROM {table_name} 
+                                    WHERE {doc_conditions}
+                                    LIMIT 8
+                                """
+                                
+                                cursor.execute(document_query)
+                                doc_rows = cursor.fetchall()
+                                
+                                if doc_rows:
+                                    found_content = True
+                                    self.logger.info(f"Found {len(doc_rows)} chunks in {table_name} with document pattern matching")
+                                    
+                                    for text, filename in doc_rows:
+                                        # Check if this chunk is already included
+                                        if not any(chunk["text"] == text for chunk in all_chunks):
+                                            all_chunks.append({
+                                                "text": text,
+                                                "filename": filename,
+                                                "table": table_name
+                                            })
+                        except Exception as e:
+                            self.logger.error(f"Error searching table {table_name} with document patterns: {str(e)}")
+                    
                     cursor.close()
                     conn.close()
                     
+                    if found_content and all_chunks:
+                        self.logger.info(f"Found {len(all_chunks)} chunks total across all tables")
+                        
+                        # Sort chunks by filename to group related content
+                        all_chunks.sort(key=lambda x: x.get("filename", ""))
+                        
+                        # Combine chunk text
+                        chunks_by_file = {}
+                        for chunk in all_chunks:
+                            filename = chunk.get("filename", "Unknown")
+                            if filename not in chunks_by_file:
+                                chunks_by_file[filename] = []
+                            chunks_by_file[filename].append(chunk.get("text", ""))
+                        
+                        # Create context string
+                        context = ""
+                        for filename, texts in chunks_by_file.items():
+                            context += f"\n\n--- From {filename} ---\n\n"
+                            context += "\n\n".join(texts)
+                        
+                        # Generate answer with OpenAI
+                        self.logger.info(f"Generating response from direct lookup with {len(chunks_by_file)} documents")
+                        
+                        prompt = f"""
+                        Based on the following document excerpts, please answer this question:
+                        
+                        Question: {query_text}
+                        
+                        Document Excerpts:
+                        {context}
+                        
+                        Answer the question using only information from the provided excerpts.
+                        If the excerpts don't contain enough information to answer the question, say so.
+                        """
+                        
+                        response = llm.complete(prompt)
+                        best_response = response.text if hasattr(response, 'text') else str(response)
+                        best_table_name = next(iter(self.available_tables)) if self.available_tables else None
+                        
+                        # Create synthetic sources
+                        for filename, texts in chunks_by_file.items():
+                            all_sources.append({
+                                "text": f"Content from {filename}",
+                                "metadata": {"file_name": filename},
+                                "score": 0.95,
+                                "table": best_table_name
+                            })
+                    else:
+                        self.logger.warning("No relevant chunks found in direct document lookup")
                 except Exception as direct_err:
                     self.logger.error(f"Error in direct document lookup: {str(direct_err)}")
             
-            # If still no results
+            # If still no results found
             if best_response is None:
                 return {
                     "error": "No relevant information found",
@@ -1333,15 +1427,19 @@ class MultiTableRAGTool:
                         embed_model=Settings.embed_model
                     )
             
-            # Configure query engine with parameters aligned with pg_rag_simple.py
+            # Configure query engine with improved parameters for better recall and accuracy
             query_engine = index.as_query_engine(
                 llm=llm,
-                similarity_top_k=10,  # Increased from 5 to retrieve more chunks
-                response_mode="compact",  # How to format the response
-                use_hybrid_search=True    # Use hybrid search for better results
+                similarity_top_k=15,           # Retrieve more chunks for better context
+                response_mode="compact",       # Format the response efficiently
+                use_hybrid_search=True,        # Combine vector and text search for better results
+                hybrid_search_kwargs={         # Fine-tune hybrid search parameters
+                    "alpha": 0.5,              # Balance between vector similarity and text search
+                },
+                relevancy_threshold=None       # Get all chunks regardless of score
             )
             
-            self.logger.info("Query engine created successfully")
+            self.logger.info("Enhanced query engine created successfully")
             return query_engine
         except Exception as e:
             self.logger.error(f"Error creating query engine: {str(e)}")

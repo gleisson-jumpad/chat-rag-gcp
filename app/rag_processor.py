@@ -108,7 +108,42 @@ def process_query_with_llm(user_message: str, rag_tool: Any, model: str = "gpt-4
             logger.warning("Empty answer returned from query")
             return "Não consegui encontrar informações relevantes nos documentos para responder essa pergunta."
         
-        # If we have sources, create a more refined response using the LLM
+        # Get the content from the sources, which may include text snippets or content
+        source_contents = []
+        for source in sources:
+            # Try to extract text content from the source
+            if "text" in source:
+                source_contents.append(source["text"])
+            
+            # Look for metadata about the document
+            if "metadata" in source and isinstance(source["metadata"], dict):
+                # Try to extract the page content if available
+                if "page_content" in source["metadata"]:
+                    source_contents.append(source["metadata"]["page_content"])
+                
+                # Try to extract file name if available
+                if "file_name" in source["metadata"]:
+                    file_name = source["metadata"]["file_name"]
+                    logger.info(f"Found source from document: {file_name}")
+        
+        # Add debugging information
+        logger.info(f"Source contents: {source_contents[:3] if source_contents else 'None'}")
+        logger.info(f"RAG answer: {rag_answer[:100]}..." if len(rag_answer) > 100 else rag_answer)
+        
+        # Extract text from answer before "Sources:" if present
+        if "Sources:" in rag_answer:
+            answer_content = rag_answer.split("Sources:")[0].strip()
+            logger.info(f"Using answer content: {answer_content[:100]}..." if len(answer_content) > 100 else answer_content)
+        else:
+            answer_content = rag_answer
+            
+        # For contract-specific queries, use the direct RAG answer without further processing
+        contract_terms = ["assinou", "assinado", "contract", "contrato", "assinatura", "coentro", "jumpad", "valor", "payment", "pagamento"]
+        if any(term in user_message.lower() for term in contract_terms) and len(answer_content) > 10:
+            logger.info("Contract-specific query detected, using direct RAG answer")
+            return answer_content
+            
+        # For general cases, proceed with LLM enhancement if we have sources
         if sources:
             logger.info(f"Found {len(sources)} sources, enhancing response with LLM")
             
@@ -132,14 +167,18 @@ def process_query_with_llm(user_message: str, rag_tool: Any, model: str = "gpt-4
                 text = source.get("text", "")
                 source_info += f"\nExcerto {i} (do documento '{doc_name}'):\n{text}\n"
             
-            # Create the user message with RAG results
+            # Create the user message with RAG results and answer content
             user_prompt = f"""
             Pergunta do usuário: {user_message}
+            
+            Resposta da busca vetorial: {answer_content}
             
             Informações encontradas nos documentos:
             {source_info}
             
             Baseando-se APENAS nas informações acima, responda à pergunta de forma clara e direta.
+            Se as informações mostrarem claramente nomes de pessoas, datas ou valores, inclua-os na resposta.
+            Se as informações fornecidas não forem suficientes para responder a pergunta, diga isso.
             """
             
             # Get enhanced response from LLM
@@ -159,7 +198,7 @@ def process_query_with_llm(user_message: str, rag_tool: Any, model: str = "gpt-4
         
         # If no sources but we have an answer, just return the RAG answer
         logger.info("No sources found, returning direct RAG answer")
-        return rag_answer
+        return answer_content
         
     except Exception as e:
         logger.error(f"Error processing query with LLM: {str(e)}")
